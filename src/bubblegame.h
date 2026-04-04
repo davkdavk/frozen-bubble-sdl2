@@ -204,10 +204,15 @@ struct Shooter {
     SDL_Rect lowRct = {};
 
     void Render(bool lowGfx){
+        #ifdef WII
+        lowGfx = true;
+        #endif
         if(!lowGfx) SDL_RenderCopyEx(renderer, texture, nullptr, &rect, (((angle*CANON_ROTATIONS)/(PI/2.0f) + 0.5) - CANON_ROTATIONS), NULL, SDL_FLIP_NONE);
         else {
             lowRct.x = (int)((rect.x - LAUNCHER_DIAMETER)  + (LAUNCHER_DIAMETER * cosf(angle)));
             lowRct.y = (int)((480 - 69) - (LAUNCHER_DIAMETER * sinf(angle)));
+            lowRct.w = rect.w;
+            lowRct.h = rect.h;
             SDL_RenderCopy(renderer, texture, nullptr, &lowRct);
         }
     }
@@ -312,8 +317,8 @@ private:
     SDL_Texture *imgMiniColorblindBubbles[BUBBLE_STYLES];
     SDL_Texture *imgMiniBubbles[BUBBLE_STYLES];
 
-    SDL_Texture *imgBubbleStick[BUBBLE_STICKFC];
-    SDL_Texture *imgMiniBubbleStick[BUBBLE_STICKFC];
+    SDL_Texture *imgBubbleStick[BUBBLE_STICKFC + 1];
+    SDL_Texture *imgMiniBubbleStick[BUBBLE_STICKFC + 1];
 
     SDL_Texture *imgBubbleFrozen, *imgMiniBubbleFrozen;
     SDL_Texture *imgBubblePrelight, *imgMiniBubblePrelight;

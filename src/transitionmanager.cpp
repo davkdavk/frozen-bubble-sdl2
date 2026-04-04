@@ -28,6 +28,9 @@ void TransitionManager::Dispose(){
 
 void TransitionManager::DoSnipIn(SDL_Renderer *rend) 
 {
+#ifdef WII
+    return;
+#endif
     if (gameSettings->gfxLevel() > 2) return;
     float w = 0, h = 0;
     SDL_RenderGetScale(rend, &w, &h);
@@ -40,6 +43,9 @@ void TransitionManager::DoSnipIn(SDL_Renderer *rend)
 
 void TransitionManager::TakeSnipOut(SDL_Renderer *rend) 
 {
+#ifdef WII
+    return;
+#endif
     if (gameSettings->gfxLevel() > 2) return;
     float w = 0, h = 0;
     SDL_RenderGetScale(rend, &w, &h);
@@ -50,4 +56,3 @@ void TransitionManager::TakeSnipOut(SDL_Renderer *rend)
     SDL_FreeSurface(sfc);
     effect(snapIn, snapOut, rend, transitionTexture);
 }
-

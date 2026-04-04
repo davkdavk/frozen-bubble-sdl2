@@ -1,6 +1,6 @@
 #include "gamesettings.h"
 
-GameSettings *GameSettings::ptrInstance = new GameSettings(); 
+GameSettings *GameSettings::ptrInstance = NULL; 
 
 GameSettings::~GameSettings() {
     iniparser_freedict(optDict);
@@ -31,7 +31,7 @@ void GameSettings::CreateDefaultSettings()
     if((setFile = fopen(setPath, "w")) == NULL)
     {
         SDL_LogError(1, "Could not create default save file. Exiting.");
-        throw;
+        return;
     }
     fclose(setFile);
 
@@ -62,7 +62,8 @@ void GameSettings::CreateDefaultSettings()
     if((setFile = fopen(setPath, "w+")) == NULL)
     {
         SDL_LogError(1, "Could not create default save file. Exiting.");
-        throw;
+        iniparser_freedict(dict);
+        return;
     }
     iniparser_dump_ini(dict, setFile);
     fclose(setFile);

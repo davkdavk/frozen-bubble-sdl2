@@ -9,8 +9,41 @@
 #include <cmath>
 #include <algorithm>
 
+#ifdef WII
+#include <stdio.h>
+#include <unistd.h>
+#include <gccore.h>
+#define BG_DEBUG_STEP(msg) do { printf("%s\n", msg); fflush(stdout); VIDEO_Flush(); VIDEO_WaitVSync(); VIDEO_WaitVSync(); usleep(500000); } while (0)
+#else
+#define BG_DEBUG_STEP(msg) do { } while (0)
+#endif
+
 inline int ranrange(int a, int b) { return a + rand() % ((b - a ) + 1); }
 inline float ranrange(float b) { return (rand()) / (static_cast <float> (RAND_MAX/b)); }
+
+static float g_motion_scale = 1.0f;
+static int g_motion_step = 1;
+
+static void update_motion_scale()
+{
+    static Uint32 last_tick = 0;
+    Uint32 now = SDL_GetTicks();
+    if (last_tick == 0 || now <= last_tick) {
+        last_tick = now;
+        g_motion_scale = 1.0f;
+        g_motion_step = 1;
+        return;
+    }
+
+    float frame_ms = (float)(now - last_tick);
+    last_tick = now;
+    float scale = frame_ms / (1000.0f / 60.0f);
+    if (scale < 1.0f) scale = 1.0f;
+    if (scale > 4.0f) scale = 4.0f;
+    g_motion_scale = scale;
+    g_motion_step = (int)(scale + 0.5f);
+    if (g_motion_step < 1) g_motion_step = 1;
+}
 
 struct SingleBubble {
     int assignedArray; // assigned board to use
@@ -58,9 +91,9 @@ struct SingleBubble {
     void UpdatePosition() {
         if (launching) {
             oldpos = pos;
-            if (!lowGfx) pos.x -= ((float)BUBBLE_SPEED) * cosf(direction);
-            else pos.x += ((float)BUBBLE_SPEED) * cosf(direction);
-            pos.y -= ((float)BUBBLE_SPEED) * sinf(direction);
+            if (!lowGfx) pos.x -= ((float)BUBBLE_SPEED) * g_motion_scale * cosf(direction);
+            else pos.x += ((float)BUBBLE_SPEED) * g_motion_scale * cosf(direction);
+            pos.y -= ((float)BUBBLE_SPEED) * g_motion_scale * sinf(direction);
             if (pos.x < leftLimit) {
                 AudioMixer::Instance()->PlaySFX("rebound");
                 pos.x = 2.0f * leftLimit - pos.x;
@@ -74,12 +107,13 @@ struct SingleBubble {
         }
         else if (falling) {
             if (waitForFall > 0) {
-                waitForFall--;
+                waitForFall -= g_motion_step;
+                if (waitForFall < 0) waitForFall = 0;
             }
             else {
                 if (!chainExists) {
-                    pos.y += genSpeed * 0.5;
-                    genSpeed += FREEFALL_CONSTANT * 0.5;
+                    pos.y += genSpeed * 0.5f * g_motion_scale;
+                    genSpeed += FREEFALL_CONSTANT * 0.5f * g_motion_scale;
                 }
                 else {
                     // not implemented
@@ -88,9 +122,9 @@ struct SingleBubble {
             }
         }
         else if (exploding) {
-            pos.x += speedX * 0.5;
-            pos.y += speedY * 0.5;
-            speedY += FREEFALL_CONSTANT * 0.5;
+            pos.x += speedX * 0.5f * g_motion_scale;
+            pos.y += speedY * 0.5f * g_motion_scale;
+            speedY += FREEFALL_CONSTANT * 0.5f * g_motion_scale;
             if(pos.y > 470) shouldClear = true;
         }
     }
@@ -109,10 +143,12 @@ std::vector<SingleBubble> singleBubbles;
 BubbleGame::BubbleGame(const SDL_Renderer *renderer) 
     : renderer(renderer)
 {
+    BG_DEBUG_STEP("BG ctor: begin");
     // We mostly just load images here. Everything else should be setup in NewGame() instead.
     SDL_Renderer *rend = const_cast<SDL_Renderer*>(renderer);
 
     char path[256];
+    BG_DEBUG_STEP("BG ctor: bubbles");
     for (int i = 1; i <= BUBBLE_STYLES; i++)
     {
         sprintf(path, DATA_DIR "/gfx/balls/bubble-%d.gif", i);
@@ -125,17 +161,32 @@ BubbleGame::BubbleGame(const SDL_Renderer *renderer)
         imgMiniColorblindBubbles[i - 1] = IMG_LoadTexture(rend, path);
     }
 
+    BG_DEBUG_STEP("BG ctor: stick fx");
+#ifdef WII
+    for (int i = 0; i <= BUBBLE_STICKFC; i++) {
+        imgBubbleStick[i] = nullptr;
+        imgMiniBubbleStick[i] = nullptr;
+    }
+#else
     for (int i = 0; i <= BUBBLE_STICKFC; i++) {
         sprintf(path, DATA_DIR "/gfx/balls/stick_effect_%d.png", i);
         imgBubbleStick[i] = IMG_LoadTexture(rend, path);
         sprintf(path, DATA_DIR "/gfx/balls/stick_effect_%d-mini.png", i);
         imgMiniBubbleStick[i] = IMG_LoadTexture(rend, path);
     }
+#endif
 
+    BG_DEBUG_STEP("BG ctor: pause penguin");
+#ifdef WII
+    for (int i = 0; i < 35; i++) {
+        pausePenguin[i] = nullptr;
+    }
+#else
     for (int i = 0; i < 35; i++) {
         sprintf(path, DATA_DIR "/gfx/pause_%04d.png", i);
         pausePenguin[i] = IMG_LoadTexture(rend, path);
     }
+#endif
 
     imgBubbleFrozen = IMG_LoadTexture(rend, DATA_DIR "/gfx/balls/bubble_lose.png");
     imgMiniBubbleFrozen = IMG_LoadTexture(rend, DATA_DIR "/gfx/balls/bubble_lose-mini.png");
@@ -164,6 +215,7 @@ BubbleGame::BubbleGame(const SDL_Renderer *renderer)
 
     pauseBackground = IMG_LoadTexture(rend, DATA_DIR "/gfx/back_paused.png");
 
+    BG_DEBUG_STEP("BG ctor: text");
     inGameText.LoadFont(DATA_DIR "/gfx/DroidSans.ttf", 20);
     inGameText.UpdateAlignment(TTF_WRAPPED_ALIGN_CENTER);
     inGameText.UpdateColor({255, 255, 255, 255}, {0, 0, 0, 255});
@@ -175,6 +227,7 @@ BubbleGame::BubbleGame(const SDL_Renderer *renderer)
     winsP2Text.LoadFont(DATA_DIR "/gfx/DroidSans.ttf", 20);
     winsP2Text.UpdateAlignment(TTF_WRAPPED_ALIGN_CENTER);
     winsP2Text.UpdateColor({255, 255, 255, 255}, {0, 0, 0, 255});
+    BG_DEBUG_STEP("BG ctor: done");
 }
 
 BubbleGame::~BubbleGame() {
@@ -485,7 +538,7 @@ void BubbleGame::UpdatePenguin(BubbleArray &bArray) {
     if (gameFinish) return;
 
     if (bArray.playerAssigned == 0) {
-        bArray.shooterAction = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_UP];
+        bArray.shooterAction = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_UP] || SDL_GetKeyboardState(NULL)[SDL_SCANCODE_RETURN];
         bArray.shooterLeft = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_LEFT];
         bArray.shooterRight = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_RIGHT];
         bArray.shooterCenter = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_DOWN];
@@ -546,16 +599,17 @@ void BubbleGame::UpdatePenguin(BubbleArray &bArray) {
 
     if (bArray.shooterLeft || bArray.shooterRight || bArray.shooterCenter) {
         if (bArray.shooterLeft) {
-            angle += lowGfx ? LAUNCHER_SPEED : -LAUNCHER_SPEED;
+            angle += (lowGfx ? LAUNCHER_SPEED : -LAUNCHER_SPEED) * g_motion_scale;
             if(penguin.curAnimation != 1 && (penguin.curAnimation > 7 || penguin.curAnimation < 2)) penguin.PlayAnimation(2);
         }
         else if (bArray.shooterRight) {
-            angle -= lowGfx ? LAUNCHER_SPEED : -LAUNCHER_SPEED;
+            angle -= (lowGfx ? LAUNCHER_SPEED : -LAUNCHER_SPEED) * g_motion_scale;
             if(penguin.curAnimation != 1 && (penguin.curAnimation > 7 || penguin.curAnimation < 2)) penguin.PlayAnimation(5);
         }
         else if (bArray.shooterCenter) {
-            if (angle >= PI/2.0f - LAUNCHER_SPEED && angle <= PI/2.0f + LAUNCHER_SPEED) angle = PI/2.0f;
-            else angle += (angle < PI/2.0f) ? LAUNCHER_SPEED : -LAUNCHER_SPEED;
+            float launcher_speed = LAUNCHER_SPEED * g_motion_scale;
+            if (angle >= PI/2.0f - launcher_speed && angle <= PI/2.0f + launcher_speed) angle = PI/2.0f;
+            else angle += (angle < PI/2.0f) ? launcher_speed : -launcher_speed;
         }
 
         penguin.sleeping = 0;
@@ -931,6 +985,7 @@ void BubbleGame::CheckGameState(BubbleArray &bArray) {
 }
 
 void BubbleGame::Render() {
+    update_motion_scale();
     SDL_Renderer *rend = const_cast<SDL_Renderer*>(renderer);
     SDL_RenderCopy(rend, background, nullptr, nullptr);
 

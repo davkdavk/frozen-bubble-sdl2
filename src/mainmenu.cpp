@@ -212,6 +212,11 @@ void MainMenu::Render(void) {
     for (MenuButton &button : buttons) {
         button.Render(renderer);
     }
+
+#ifdef WII
+    return;
+#endif
+
     BannerRender();
     BlinkRender();
     CandyRender();

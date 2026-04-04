@@ -1,5 +1,17 @@
 #include "frozenbubble.h"
 
+#ifdef WII
+#include <stdio.h>
+#include <unistd.h>
+#include <gccore.h>
+#endif
+
+#ifdef WII
+#define FB_DEBUG_STEP(msg) do { printf("%s\n", msg); fflush(stdout); VIDEO_Flush(); VIDEO_WaitVSync(); VIDEO_WaitVSync(); usleep(500000); } while (0)
+#else
+#define FB_DEBUG_STEP(msg) do { } while (0)
+#endif
+
 FrozenBubble *FrozenBubble::ptrInstance = NULL;
 
 const char *formatTime(int time){
@@ -27,13 +39,15 @@ FrozenBubble *FrozenBubble::Instance()
     return ptrInstance;
 }
 
-FrozenBubble::FrozenBubble() {
+FrozenBubble::FrozenBubble() : IsGameQuit(false), IsGamePause(false), window(nullptr), renderer(nullptr), gameOptions(nullptr), audMixer(nullptr), mainMenu(nullptr), mainGame(nullptr), hiscoreManager(nullptr) {
+    FB_DEBUG_STEP("FB ctor: settings");
     gameOptions = GameSettings::Instance();
     gameOptions->ReadSettings();
 
     SDL_Point resolution = gameOptions->curResolution();
     Uint32 fullscreen = gameOptions->fullscreenMode() ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0;
 
+    FB_DEBUG_STEP("FB ctor: window");
     window = SDL_CreateWindow("Frozen-Bubble: SDL2", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, resolution.x, resolution.y, fullscreen);
     if(gameOptions->linearScaling) SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "best");
 
@@ -42,10 +56,12 @@ FrozenBubble::FrozenBubble() {
         std::cout << "Failed to create window: " << SDL_GetError() << std::endl;
     }
 
+    FB_DEBUG_STEP("FB ctor: icon");
     SDL_Surface *icon = SDL_LoadBMP(DATA_DIR "/gfx/pinguins/window_icon_penguin.bmp");
     SDL_SetWindowIcon(window, icon);
     SDL_FreeSurface(icon);
 
+    FB_DEBUG_STEP("FB ctor: renderer");
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     SDL_RenderSetLogicalSize(renderer, 640, 480);
 
@@ -54,18 +70,26 @@ FrozenBubble::FrozenBubble() {
         std::cout << "Failed to create renderer: " << SDL_GetError() << std::endl;
     }
 
+    FB_DEBUG_STEP("FB ctor: ttf");
     if( TTF_Init() == -1 )
     {
         IsGameQuit = true;
         std::cout << "Failed to initialise SDL_ttf: " << SDL_GetError() << std::endl;
     }
 
+    FB_DEBUG_STEP("FB ctor: audio");
     audMixer = AudioMixer::Instance();
+    FB_DEBUG_STEP("FB ctor: highscores");
     hiscoreManager = HighscoreManager::Instance(renderer);
 
+    FB_DEBUG_STEP("FB ctor: effects");
     init_effects((char*)DATA_DIR);
+    FB_DEBUG_STEP("FB ctor: mainmenu");
     mainMenu = new MainMenu(renderer);
+    FB_DEBUG_STEP("FB ctor: bubblegame");
     mainGame = new BubbleGame(renderer);
+
+    FB_DEBUG_STEP("FB ctor: done");
 
 }
 
@@ -93,13 +117,15 @@ FrozenBubble::~FrozenBubble() {
 uint8_t FrozenBubble::RunForEver()
 {
     // on init, try playing one of these songs depending on the current state:
+#ifndef WII
     if(currentState == TitleScreen) audMixer->PlayMusic("intro");
+#endif
     //else if (currentState == MainGame) mainGame->NewGame({false, 1, false});
 
     float framerate = 60;
     float frametime = 1/framerate * 1000;
 
-    unsigned int ticks, lasttick = 0;
+    unsigned int ticks = SDL_GetTicks(), lasttick = ticks;
     float elapsed = 0;
 
     while(!IsGameQuit) {

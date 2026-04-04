@@ -7,6 +7,15 @@
 #include <sstream>
 #include <string>
 
+#ifdef WII
+#include <stdio.h>
+#include <unistd.h>
+#include <gccore.h>
+#define HS_DEBUG_STEP(msg) do { printf("%s\n", msg); fflush(stdout); VIDEO_Flush(); VIDEO_WaitVSync(); VIDEO_WaitVSync(); usleep(500000); } while (0)
+#else
+#define HS_DEBUG_STEP(msg) do { } while (0)
+#endif
+
 struct HighscoreData {
     int level;
     float time;
@@ -127,9 +136,11 @@ void HighscoreManager::AppendToLevels(std::array<std::vector<int>, 10> lvl, int 
 
 HighscoreManager::HighscoreManager(SDL_Renderer *renderer)
 {
+    HS_DEBUG_STEP("HS ctor: begin");
     rend = renderer;
     gameSettings = GameSettings::Instance();
 
+    HS_DEBUG_STEP("HS ctor: background");
     backgroundSfc = IMG_Load(DATA_DIR "/gfx/back_one_player.png");
 
     char path[256];
@@ -145,15 +156,18 @@ HighscoreManager::HighscoreManager(SDL_Renderer *renderer)
         }
     }
 
+    HS_DEBUG_STEP("HS ctor: textures");
     highscoresBG = IMG_LoadTexture(rend, DATA_DIR "/gfx/back_hiscores.png");
     highscoreFrame = IMG_LoadTexture(rend, DATA_DIR "/gfx/hiscore_frame.png");
     headerLevelset = IMG_LoadTexture(rend, DATA_DIR "/gfx/hiscore-levelset.png");
     headerMptrain = IMG_LoadTexture(rend, DATA_DIR "/gfx/hiscore-mptraining.png");
 
+    HS_DEBUG_STEP("HS ctor: font");
     highscoreFont = TTF_OpenFont(DATA_DIR "/gfx/DroidSans.ttf", 18);
 
     voidPanelBG = IMG_LoadTexture(rend, DATA_DIR "/gfx/menu/void_panel.png");
     
+    HS_DEBUG_STEP("HS ctor: text init");
     panelText.LoadFont(DATA_DIR "/gfx/DroidSans.ttf", 15);
     nameInput.LoadFont(DATA_DIR "/gfx/DroidSans.ttf", 15);
     panelText.UpdateAlignment(TTF_WRAPPED_ALIGN_CENTER);
@@ -165,12 +179,15 @@ HighscoreManager::HighscoreManager(SDL_Renderer *renderer)
     panelText.UpdatePosition({(640/2) - (panelText.Coords()->w / 2), (480/2) - 120});
     nameInput.UpdatePosition({(640/2) - 45 - (panelText.Coords()->w / 2), (480/2) - 25});
 
+    HS_DEBUG_STEP("HS ctor: load files");
     std::string historypath = gameSettings->prefPath + std::string("highlevelshistory");
     std::string levelsetpath = gameSettings->prefPath + std::string("highscores");
     LoadHighscoreLevels(historypath.c_str());
     LoadLevelsetHighscores(levelsetpath.c_str());
 
+    HS_DEBUG_STEP("HS ctor: level images");
     CreateLevelImages();
+    HS_DEBUG_STEP("HS ctor: done");
 }
 
 HighscoreManager::~HighscoreManager(){

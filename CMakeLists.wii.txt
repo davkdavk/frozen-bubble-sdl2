@@ -1,0 +1,66 @@
+cmake_minimum_required(VERSION 3.13)
+
+project(frozen-bubble-wii CXX)
+
+set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_SYSTEM_PROCESSOR powerpc)
+
+set(DEVKITPRO /opt/devkitpro)
+set(DEVKITPPC ${DEVKITPRO}/devkitPPC)
+
+set(CMAKE_C_COMPILER ${DEVKITPPC}/bin/powerpc-eabi-gcc)
+set(CMAKE_CXX_COMPILER ${DEVKITPPC}/bin/powerpc-eabi-g++)
+set(CMAKE_AR ${DEVKITPPC}/bin/powerpc-eabi-ar CACHE FILEPATH "Archive manager")
+set(CMAKE_RANLIB ${DEVKITPPC}/bin/powerpc-eabi-ranlib CACHE FILEPATH "Ranlib")
+
+set(OGC_INCLUDE ${DEVKITPRO}/libogc/include)
+set(OGC_LIB ${DEVKITPRO}/libogc/lib/wii)
+
+include_directories(${OGC_INCLUDE})
+include_directories(${CMAKE_SOURCE_DIR}/inc)
+
+set(CMAKE_C_FLAGS_INIT "-mhard-float -mcpu=750 -meabi -mno-sdata")
+set(CMAKE_CXX_FLAGS_INIT "-mhard-float -mcpu=750 -meabi -mno-sdata -fno-exceptions -fno-rtti")
+set(CMAKE_EXE_LINKER_FLAGS_INIT "-Wl,--gc-sections -nodefaults")
+
+set(WII_SOURCES
+    src/sdl_ogc_impl.cpp
+    src/wii_input.cpp
+    src/main_wii.cpp
+    src/frozenbubble.cpp
+    src/menubutton.cpp
+    src/mainmenu.cpp
+    src/gamesettings.cpp
+    src/audiomixer.cpp
+    src/shaderstuff.cpp
+    src/bubblegame.cpp
+    src/transitionmanager.cpp
+    src/ttftext.cpp
+    src/highscoremanager.cpp
+)
+
+add_executable(frozen-bubble-wii.elf ${WII_SOURCES})
+
+set_property(TARGET frozen-bubble-wii.elf PROPERTY CXX_STANDARD 17)
+set_property(TARGET frozen-bubble-wii.elf PROPERTY CXX_EXTENSIONS OFF)
+
+target_compile_definitions(frozen-bubble-wii.elf PRIVATE DATA_DIR=\"sd:/apps/frozenbubble/share\")
+
+target_link_libraries(frozen-bubble-wii.elf PRIVATE
+    ${OGC_LIB}/libogc.a
+    ${OGC_LIB}/libwiiuse.a
+    ${OGC_LIB}/libfat.a
+    ${OGC_LIB}/libasnd.a
+    ${OGC_LIB}/libmad.a
+    ${OGC_LIB}/libmodplay.a
+    -lstdc++ -lgcc
+)
+
+add_custom_command(OUTPUT frozen-bubble-wii.dol
+    COMMAND ${DEVKITPPC}/bin/powerpc-eabi-objcopy -O binary frozen-bubble-wii.elf frozen-bubble-wii.bin
+    COMMAND ${DEVKITPRO}/tools/bin/makedol -elf frozen-bubble-wii.elf -o frozen-bubble-wii.dol
+    DEPENDS frozen-bubble-wii.elf
+    COMMENT "Creating Wii DOL file"
+)
+
+add_custom_target(dol ALL DEPENDS frozen-bubble-wii.dol)

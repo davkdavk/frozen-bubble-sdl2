@@ -278,12 +278,28 @@ void plasma_init(char *datapath)
         fb__out_of_memory();
     sprintf(finalpath, "%s%s", datapath, mypath);
     f = fopen(finalpath, "rb");
+#ifdef WII
+    if (!f)
+        f = fopen("share/data/plasma.raw", "rb");
+    if (!f)
+        f = fopen("/home/davey/frozenbubble/frozen-bubble-sdl2/share/data/plasma.raw", "rb");
+#endif
     free(finalpath);
 
     if (!f)
     {
         fprintf(stderr, "Ouch, could not open plasma.raw for reading\n");
-        exit(1);
+        plasma = (unsigned char *)calloc(XRES * YRES, 1);
+        if (!plasma)
+            fb__out_of_memory();
+        plasma2 = (unsigned char *)calloc(XRES * YRES, 1);
+        if (!plasma2)
+            fb__out_of_memory();
+        plasma3 = (unsigned char *)calloc(XRES * YRES, 1);
+        if (!plasma3)
+            fb__out_of_memory();
+        plasma_max = 0;
+        return;
     }
 
     plasma = (unsigned char *)malloc(XRES * YRES);
@@ -292,7 +308,19 @@ void plasma_init(char *datapath)
     if (fread(plasma, 1, XRES * YRES, f) != XRES * YRES)
     {
         fprintf(stderr, "Ouch, could not read %d bytes from plasma file\n", XRES * YRES);
-        exit(1);
+        fclose(f);
+        free(plasma);
+        plasma = (unsigned char *)calloc(XRES * YRES, 1);
+        if (!plasma)
+            fb__out_of_memory();
+        plasma2 = (unsigned char *)calloc(XRES * YRES, 1);
+        if (!plasma2)
+            fb__out_of_memory();
+        plasma3 = (unsigned char *)calloc(XRES * YRES, 1);
+        if (!plasma3)
+            fb__out_of_memory();
+        plasma_max = 0;
+        return;
     }
 
     fclose(f);

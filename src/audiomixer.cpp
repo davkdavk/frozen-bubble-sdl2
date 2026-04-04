@@ -46,7 +46,6 @@ AudioMixer::~AudioMixer(){
 }
 
 void AudioMixer::Dispose(){
-    Mix_Quit();
     this->~AudioMixer();
 }
 

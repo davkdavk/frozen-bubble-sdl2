@@ -32,6 +32,7 @@ public:
     GameSettings(const GameSettings& obj) = delete;
     void Dispose();
     static GameSettings* Instance(){
+        if (!ptrInstance) ptrInstance = new GameSettings();
         return ptrInstance;
     };
 private:

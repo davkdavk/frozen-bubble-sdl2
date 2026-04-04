@@ -1,57 +1,35 @@
 cmake_minimum_required(VERSION 3.13)
 
-project(frozen-bubble-sdl2 CXX)
+project(frozen-bubble-wii)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
+set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_SYSTEM_PROCESSOR powerpc)
 
-set(DEFAULT_BUILD_TYPE "Release")
-if(NOT CMAKE_CONFIGURATION_TYPES AND NOT (CMAKE_BUILD_TYPE OR DEFINED ENV{CMAKE_BUILD_TYPE}))
-    message(STATUS "Setting build type to '${DEFAULT_BUILD_TYPE}' as none was specified.")
-    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY VALUE "${DEFAULT_BUILD_TYPE}")
-endif()
+set(DEVKITPRO /opt/devkitpro)
+set(DEVKITPPC ${DEVKITPRO}/devkitPPC)
 
-if (("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU") OR ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang"))
-    add_compile_options(-Wall -Wextra -pedantic -Wno-pointer-arith)
-endif()
+set(CMAKE_C_COMPILER ${DEVKITPPC}/bin/powerpc-eabi-gcc)
+set(CMAKE_CXX_COMPILER ${DEVKITPPC}/bin/powerpc-eabi-g++)
+set(CMAKE_AR ${DEVKITPPC}/bin/powerpc-eabi-ar CACHE FILEPATH "Archive manager")
+set(CMAKE_RANLIB ${DEVKITPPC}/bin/powerpc-eabi-ranlib CACHE FILEPATH "Ranlib")
+set(CMAKE_LINKER ${DEVKITPPC}/bin/powerpc-eabi-g++)
+set(CMAKE_CMAKE_CURRENT_LIST_DIR /home/davey/frozenbubble/frozen-bubble-sdl2/cmake)
 
-find_package(SDL2 REQUIRED)
-find_package(SDL2_image REQUIRED)
-find_package(SDL2_mixer REQUIRED)
-find_package(SDL2_ttf REQUIRED)
+set(OGC_INCLUDE ${DEVKITPRO}/libogc/include)
+set(OGC_LIB ${DEVKITPRO}/libogc/lib/wii)
 
-find_package(iniparser REQUIRED static)
+include_directories(${OGC_INCLUDE})
+include_directories(${CMAKE_SOURCE_DIR}/inc)
+include_directories(${CMAKE_SOURCE_DIR}/inc/SDL2)
 
-if(NOT SDL2_image_FOUND)
-    message(FATAL_ERROR "SDL2_image not found")
-endif()
+add_compile_options(-g -O2 -Wall -DGEKKO -mrvl -mcpu=750 -meabi -mhard-float -DWII -D__wii__ -fno-rtti -fexceptions -I${CMAKE_SOURCE_DIR}/inc)
 
-if(NOT SDL2_mixer_FOUND)
-    message(FATAL_ERROR "SDL2_mixer not found")
-endif()
-
-if(NOT SDL2_ttf_FOUND)
-    message(FATAL_ERROR "SDL2_ttf not found")
-endif()
-
-if(UNIX OR APPLE)
-    add_subdirectory(server)
-endif()
-
-if(APPLE)
-    include_directories("/opt/homebrew/include")
-    include_directories("/usr/local/include")
-endif()
-
-set(RES_FILES "")
-if(WIN32 OR MINGW)
-    set(RES_FILES share/icons/fb.rc)
-    set(CMAKE_RC_COMPILER_INIT windres)
-    ENABLE_LANGUAGE(RC)
-endif()
-
-add_executable(frozen-bubble-sdl2
+set(WII_SOURCES
+    src/sdl_ogc_impl.cpp
+    src/wii_input.cpp
+    src/main_wii.cpp
+    src/iniparser_stub.cpp
     src/frozenbubble.cpp
-    src/main.cpp
     src/menubutton.cpp
     src/mainmenu.cpp
     src/gamesettings.cpp
@@ -61,34 +39,25 @@ add_executable(frozen-bubble-sdl2
     src/transitionmanager.cpp
     src/ttftext.cpp
     src/highscoremanager.cpp
-    ${RES_FILES}
 )
 
-set_property(TARGET frozen-bubble-sdl2 PROPERTY CXX_STANDARD 17)
-set_property(TARGET frozen-bubble-sdl2 PROPERTY CXX_EXTENSIONS OFF)
+add_executable(frozen-bubble-wii.elf ${WII_SOURCES})
 
-if(NOT DEFINED ASSET_PATH)
-    set(ASSET_PATH ${CMAKE_SOURCE_DIR}/share)
-endif()
+set_property(TARGET frozen-bubble-wii.elf PROPERTY CXX_STANDARD 17)
+set_property(TARGET frozen-bubble-wii.elf PROPERTY CXX_EXTENSIONS OFF)
 
-message("Asset path is: ${ASSET_PATH}")
+target_compile_definitions(frozen-bubble-wii.elf PRIVATE DATA_DIR=\"sd:/apps/frozenbubble/share\")
 
-target_compile_definitions(frozen-bubble-sdl2
-    PRIVATE DATA_DIR=\"${ASSET_PATH}\"
+target_link_libraries(frozen-bubble-wii.elf PRIVATE
+    -lwiiuse -lbte -lfat -logc -lm -lc -lstdc++ -lgcc
 )
 
-target_include_directories(frozen-bubble-sdl2
-    SYSTEM
-    PRIVATE ${SDL2_INCLUDE_DIRS}
-    PRIVATE ${SDL2_IMAGE_INCLUDE_DIRS}
-    PRIVATE ${SDL2_MIXER_INCLUDE_DIRS}
-    PRIVATE ${SDL2_TTF_INCLUDE_DIRS}
+set(CMAKE_EXE_LINKER_FLAGS "-g -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/frozen-bubble-wii.elf.map -Wl,--gc-sections -L${OGC_LIB} -Wl,-e,__app_start -fno-exceptions -T${DEVKITPPC}/powerpc-eabi/lib/rvl.ld -Wl,--defsym,__isIPL=0")
+
+add_custom_command(OUTPUT frozen-bubble-wii.dol
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/cmake/elf2dol.py frozen-bubble-wii.elf frozen-bubble-wii.dol
+    DEPENDS frozen-bubble-wii.elf
+    COMMENT "Creating Wii DOL file"
 )
 
-target_link_libraries(frozen-bubble-sdl2 PRIVATE
-    SDL2::SDL2
-    iniparser-static
-    SDL2_image::SDL2_image
-    SDL2_mixer::SDL2_mixer
-    SDL2_ttf::SDL2_ttf
-)
+add_custom_target(dol ALL DEPENDS frozen-bubble-wii.dol)
