@@ -204,10 +204,11 @@ struct Shooter {
     SDL_Rect lowRct = {};
 
     void Render(bool lowGfx){
-        #ifdef WII
-        lowGfx = true;
-        #endif
-        if(!lowGfx) SDL_RenderCopyEx(renderer, texture, nullptr, &rect, (((angle*CANON_ROTATIONS)/(PI/2.0f) + 0.5) - CANON_ROTATIONS), NULL, SDL_FLIP_NONE);
+        // WII: SDL_RenderCopyEx now supports rotation via GX quad transform,
+        // so we always use the high-quality rotated path regardless of lowGfx.
+        // Convert cannon angle (radians, PI/2=up, 0=right, PI=left) to SDL
+        // degrees (0=up, positive=clockwise) for SDL_RenderCopyEx.
+        if(!lowGfx) SDL_RenderCopyEx(renderer, texture, nullptr, &rect, (PI/2.0f - angle) * (180.0f / PI), NULL, SDL_FLIP_NONE);
         else {
             lowRct.x = (int)((rect.x - LAUNCHER_DIAMETER)  + (LAUNCHER_DIAMETER * cosf(angle)));
             lowRct.y = (int)((480 - 69) - (LAUNCHER_DIAMETER * sinf(angle)));

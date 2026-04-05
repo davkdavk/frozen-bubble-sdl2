@@ -6,11 +6,7 @@
 #include <gccore.h>
 #endif
 
-#ifdef WII
-#define FB_DEBUG_STEP(msg) do { printf("%s\n", msg); fflush(stdout); VIDEO_Flush(); VIDEO_WaitVSync(); VIDEO_WaitVSync(); usleep(500000); } while (0)
-#else
 #define FB_DEBUG_STEP(msg) do { } while (0)
-#endif
 
 FrozenBubble *FrozenBubble::ptrInstance = NULL;
 
@@ -123,15 +119,23 @@ uint8_t FrozenBubble::RunForEver()
     //else if (currentState == MainGame) mainGame->NewGame({false, 1, false});
 
     float framerate = 60;
+#ifndef WII
     float frametime = 1/framerate * 1000;
+#else
+    (void)framerate;
+#endif
 
     unsigned int ticks = SDL_GetTicks(), lasttick = ticks;
+#ifndef WII
     float elapsed = 0;
+#endif
 
     while(!IsGameQuit) {
         lasttick = ticks;
         ticks = SDL_GetTicks();
+#ifndef WII
         elapsed = ticks - lasttick;
+#endif
 
         // handle input
         SDL_Event e;
@@ -156,12 +160,25 @@ uint8_t FrozenBubble::RunForEver()
                 SDL_RenderPresent(renderer);
             }
         }
+        // On Wii, VIDEO_WaitVSync() inside SDL_RenderPresent already paces the
+        // frame to ~16.7ms. Adding SDL_Delay on top doubles the frame time to
+        // ~32ms (31fps). Skip the delay on Wii and let vsync do the pacing.
+#ifndef WII
         if(elapsed < frametime) {
             SDL_Delay(frametime - elapsed);
         }
+#endif
     }
     if (startTime != 0) addictedTime += SDL_GetTicks() - startTime;
     if(addictedTime != 0) printf("Addicted for %s, %d bubbles were launched.", formatTime(addictedTime/1000), totalBubbles);
+#ifdef WII
+    // On Wii, return safely to HBC rather than invoking the destructor and
+    // going through the C++ atexit/exit path, which triggers ISI crashes when
+    // libogc callbacks fire against already-freed GX/video memory.
+    SYS_ResetSystem(SYS_RETURNTOMENU, 0, 0);
+    // Should not be reached, but satisfy the compiler:
+    return 0;
+#endif
     this->~FrozenBubble();
     return 0;
 }
@@ -188,6 +205,14 @@ void FrozenBubble::HandleInput(SDL_Event *e) {
                     CallGamePause();
                     if (currentState == MainGame) {
                         if (!mainGame->playedPause) mainGame->playedPause = false;
+                    }
+                    break;
+                case SDLK_ESCAPE:
+                    // Home button: return to main menu from anywhere; quit from title screen.
+                    if (currentState == MainGame) {
+                        CallMenuReturn();
+                    } else {
+                        IsGameQuit = true;
                     }
                     break;
             }

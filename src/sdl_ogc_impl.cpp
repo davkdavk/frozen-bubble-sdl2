@@ -1,5 +1,6 @@
 #include "sdl_ogc_shim.h"
 #include "sdl_ogc_impl.h"
+#include "wii_input.h"
 #include <ogc/system.h>
 #include <ogc/lwp_watchdog.h>
 #include <ogc/video.h>
@@ -60,67 +61,218 @@ static inline u8 clamp_u8(int value)
     return (u8)value;
 }
 
-static inline void rgb_to_ycbcr(u8 r, u8 g, u8 b, u8* y, u8* cb, u8* cr)
+// ---------------------------------------------------------------------------
+// GX texture tiling: convert linear RGBA8888 → GX_TF_RGBA8 tile layout.
+// GX_TF_RGBA8 stores 4×4 pixel blocks as 32 bytes:
+//   bytes 0–15  = AR pairs for all 16 pixels (row-major within block)
+//   bytes 16–31 = GB pairs for the same 16 pixels
+// src is RGBA8888 (R in bits 31:24, G 23:16, B 15:8, A 7:0).
+// w and h must be multiples of 4; caller is responsible for padding.
+// ---------------------------------------------------------------------------
+static void tile_rgba8(const uint32_t* src, int w, int h, uint8_t* dst)
 {
-    int yi = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-    int cbi = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-    int cri = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
-    *y = clamp_u8(yi);
-    *cb = clamp_u8(cbi);
-    *cr = clamp_u8(cri);
-}
-
-static void clear_xfb_black(void* fb, int width, int height)
-{
-    u16* xfb = (u16*)fb;
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x += 2) {
-            int out = y * width + x;
-            xfb[out] = (16 << 8) | 128;
-            xfb[out + 1] = (16 << 8) | 128;
+    int blocks_x = w / 4;
+    int blocks_y = h / 4;
+    for (int by = 0; by < blocks_y; by++) {
+        for (int bx = 0; bx < blocks_x; bx++) {
+            uint8_t* block = dst + (by * blocks_x + bx) * 64;
+            uint8_t* ar = block;
+            uint8_t* gb = block + 32;
+            for (int py = 0; py < 4; py++) {
+                for (int px = 0; px < 4; px++) {
+                    uint32_t p = src[(by * 4 + py) * w + (bx * 4 + px)];
+                    uint8_t r = (p >> 24) & 0xFF;
+                    uint8_t g = (p >> 16) & 0xFF;
+                    uint8_t b = (p >>  8) & 0xFF;
+                    uint8_t a = (p      ) & 0xFF;
+                    int i = py * 4 + px;
+                    ar[i * 2 + 0] = a;
+                    ar[i * 2 + 1] = r;
+                    gb[i * 2 + 0] = g;
+                    gb[i * 2 + 1] = b;
+                }
+            }
         }
     }
-    DCFlushRange(fb, width * height * 2);
 }
 
+// Round w/h up to next multiple of 4 for GX tiling.
+static inline int gx_pad4(int v) { return (v + 3) & ~3; }
+
+// Minimal 8x8 bitmap font covering ASCII 32–126.
+// Each character is 8 bytes; bit 7 of each byte is the leftmost pixel.
+// Sourced from the classic public-domain VGA ROM font.
+static const uint8_t font8x8[95][8] = {
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // ' '
+    {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00}, // '!'
+    {0x36,0x36,0x00,0x00,0x00,0x00,0x00,0x00}, // '"'
+    {0x36,0x36,0x7F,0x36,0x7F,0x36,0x36,0x00}, // '#'
+    {0x0C,0x3E,0x03,0x1E,0x30,0x1F,0x0C,0x00}, // '$'
+    {0x00,0x63,0x33,0x18,0x0C,0x66,0x63,0x00}, // '%'
+    {0x1C,0x36,0x1C,0x6E,0x3B,0x33,0x6E,0x00}, // '&'
+    {0x06,0x06,0x03,0x00,0x00,0x00,0x00,0x00}, // '\''
+    {0x18,0x0C,0x06,0x06,0x06,0x0C,0x18,0x00}, // '('
+    {0x06,0x0C,0x18,0x18,0x18,0x0C,0x06,0x00}, // ')'
+    {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, // '*'
+    {0x00,0x0C,0x0C,0x3F,0x0C,0x0C,0x00,0x00}, // '+'
+    {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x06}, // ','
+    {0x00,0x00,0x00,0x3F,0x00,0x00,0x00,0x00}, // '-'
+    {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x00}, // '.'
+    {0x60,0x30,0x18,0x0C,0x06,0x03,0x01,0x00}, // '/'
+    {0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00}, // '0'
+    {0x0C,0x0E,0x0C,0x0C,0x0C,0x0C,0x3F,0x00}, // '1'
+    {0x1E,0x33,0x30,0x1C,0x06,0x33,0x3F,0x00}, // '2'
+    {0x1E,0x33,0x30,0x1C,0x30,0x33,0x1E,0x00}, // '3'
+    {0x38,0x3C,0x36,0x33,0x7F,0x30,0x78,0x00}, // '4'
+    {0x3F,0x03,0x1F,0x30,0x30,0x33,0x1E,0x00}, // '5'
+    {0x1C,0x06,0x03,0x1F,0x33,0x33,0x1E,0x00}, // '6'
+    {0x3F,0x33,0x30,0x18,0x0C,0x0C,0x0C,0x00}, // '7'
+    {0x1E,0x33,0x33,0x1E,0x33,0x33,0x1E,0x00}, // '8'
+    {0x1E,0x33,0x33,0x3E,0x30,0x18,0x0E,0x00}, // '9'
+    {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x00}, // ':'
+    {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x06}, // ';'
+    {0x18,0x0C,0x06,0x03,0x06,0x0C,0x18,0x00}, // '<'
+    {0x00,0x00,0x3F,0x00,0x00,0x3F,0x00,0x00}, // '='
+    {0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00}, // '>'
+    {0x1E,0x33,0x30,0x18,0x0C,0x00,0x0C,0x00}, // '?'
+    {0x3E,0x63,0x7B,0x7B,0x7B,0x03,0x1E,0x00}, // '@'
+    {0x0C,0x1E,0x33,0x33,0x3F,0x33,0x33,0x00}, // 'A'
+    {0x3F,0x66,0x66,0x3E,0x66,0x66,0x3F,0x00}, // 'B'
+    {0x3C,0x66,0x03,0x03,0x03,0x66,0x3C,0x00}, // 'C'
+    {0x1F,0x36,0x66,0x66,0x66,0x36,0x1F,0x00}, // 'D'
+    {0x7F,0x46,0x16,0x1E,0x16,0x46,0x7F,0x00}, // 'E'
+    {0x7F,0x46,0x16,0x1E,0x16,0x06,0x0F,0x00}, // 'F'
+    {0x3C,0x66,0x03,0x03,0x73,0x66,0x7C,0x00}, // 'G'
+    {0x33,0x33,0x33,0x3F,0x33,0x33,0x33,0x00}, // 'H'
+    {0x1E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, // 'I'
+    {0x78,0x30,0x30,0x30,0x33,0x33,0x1E,0x00}, // 'J'
+    {0x67,0x66,0x36,0x1E,0x36,0x66,0x67,0x00}, // 'K'
+    {0x0F,0x06,0x06,0x06,0x46,0x66,0x7F,0x00}, // 'L'
+    {0x63,0x77,0x7F,0x7F,0x6B,0x63,0x63,0x00}, // 'M'
+    {0x63,0x67,0x6F,0x7B,0x73,0x63,0x63,0x00}, // 'N'
+    {0x1C,0x36,0x63,0x63,0x63,0x36,0x1C,0x00}, // 'O'
+    {0x3F,0x66,0x66,0x3E,0x06,0x06,0x0F,0x00}, // 'P'
+    {0x1E,0x33,0x33,0x33,0x3B,0x1E,0x38,0x00}, // 'Q'
+    {0x3F,0x66,0x66,0x3E,0x36,0x66,0x67,0x00}, // 'R'
+    {0x1E,0x33,0x07,0x0E,0x38,0x33,0x1E,0x00}, // 'S'
+    {0x3F,0x2D,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, // 'T'
+    {0x33,0x33,0x33,0x33,0x33,0x33,0x3F,0x00}, // 'U'
+    {0x33,0x33,0x33,0x33,0x33,0x1E,0x0C,0x00}, // 'V'
+    {0x63,0x63,0x63,0x6B,0x7F,0x77,0x63,0x00}, // 'W'
+    {0x63,0x63,0x36,0x1C,0x1C,0x36,0x63,0x00}, // 'X'
+    {0x33,0x33,0x33,0x1E,0x0C,0x0C,0x1E,0x00}, // 'Y'
+    {0x7F,0x63,0x31,0x18,0x4C,0x66,0x7F,0x00}, // 'Z'
+    {0x1E,0x06,0x06,0x06,0x06,0x06,0x1E,0x00}, // '['
+    {0x03,0x06,0x0C,0x18,0x30,0x60,0x40,0x00}, // '\\'
+    {0x1E,0x18,0x18,0x18,0x18,0x18,0x1E,0x00}, // ']'
+    {0x08,0x1C,0x36,0x63,0x00,0x00,0x00,0x00}, // '^'
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF}, // '_'
+    {0x0C,0x0C,0x18,0x00,0x00,0x00,0x00,0x00}, // '`'
+    {0x00,0x00,0x1E,0x30,0x3E,0x33,0x6E,0x00}, // 'a'
+    {0x07,0x06,0x06,0x3E,0x66,0x66,0x3B,0x00}, // 'b'
+    {0x00,0x00,0x1E,0x33,0x03,0x33,0x1E,0x00}, // 'c'
+    {0x38,0x30,0x30,0x3e,0x33,0x33,0x6E,0x00}, // 'd'
+    {0x00,0x00,0x1E,0x33,0x3f,0x03,0x1E,0x00}, // 'e'
+    {0x1C,0x36,0x06,0x0f,0x06,0x06,0x0F,0x00}, // 'f'
+    {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x1F}, // 'g'
+    {0x07,0x06,0x36,0x6E,0x66,0x66,0x67,0x00}, // 'h'
+    {0x0C,0x00,0x0E,0x0C,0x0C,0x0C,0x1E,0x00}, // 'i'
+    {0x30,0x00,0x30,0x30,0x30,0x33,0x33,0x1E}, // 'j'
+    {0x07,0x06,0x66,0x36,0x1E,0x36,0x67,0x00}, // 'k'
+    {0x0E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, // 'l'
+    {0x00,0x00,0x33,0x7F,0x7F,0x6B,0x63,0x00}, // 'm'
+    {0x00,0x00,0x1F,0x33,0x33,0x33,0x33,0x00}, // 'n'
+    {0x00,0x00,0x1E,0x33,0x33,0x33,0x1E,0x00}, // 'o'
+    {0x00,0x00,0x3B,0x66,0x66,0x3E,0x06,0x0F}, // 'p'
+    {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x78}, // 'q'
+    {0x00,0x00,0x3B,0x6E,0x66,0x06,0x0F,0x00}, // 'r'
+    {0x00,0x00,0x3E,0x03,0x1E,0x30,0x1F,0x00}, // 's'
+    {0x08,0x0C,0x3E,0x0C,0x0C,0x2C,0x18,0x00}, // 't'
+    {0x00,0x00,0x33,0x33,0x33,0x33,0x6E,0x00}, // 'u'
+    {0x00,0x00,0x33,0x33,0x33,0x1E,0x0C,0x00}, // 'v'
+    {0x00,0x00,0x63,0x6B,0x7F,0x7F,0x36,0x00}, // 'w'
+    {0x00,0x00,0x63,0x36,0x1C,0x36,0x63,0x00}, // 'x'
+    {0x00,0x00,0x33,0x33,0x33,0x3E,0x30,0x1F}, // 'y'
+    {0x00,0x00,0x3F,0x19,0x0C,0x26,0x3F,0x00}, // 'z'
+    {0x38,0x0C,0x0C,0x07,0x0C,0x0C,0x38,0x00}, // '{'
+    {0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x00}, // '|'
+    {0x07,0x0C,0x0C,0x38,0x0C,0x0C,0x07,0x00}, // '}'
+    {0x6E,0x3B,0x00,0x00,0x00,0x00,0x00,0x00}, // '~'
+};
+
+// Render text into an RGBA surface using the embedded 8x8 bitmap font.
+// Each glyph cell is 8px wide x 16px tall (rows doubled for readability).
+// Transparent background; foreground color fg.
 static SDL_Surface* create_text_surface(const char* text, SDL_Color fg, uint32_t wrap)
 {
-    int text_len = text ? (int)strlen(text) : 0;
-    int max_chars = wrap > 0 ? (int)(wrap / 8) : text_len;
-    int line_width = 0;
-    int max_width = 0;
-    int lines = 1;
+    if (!text) text = "";
+    int text_len = (int)strlen(text);
 
-    if (max_chars <= 0) max_chars = text_len > 0 ? text_len : 1;
+    // Measure: split into lines, respecting '\n' and wrap width.
+    const int CELL_W = 8;
+    const int CELL_H = 16; // 8px glyph doubled vertically
 
-    for (int i = 0; i < text_len; i++) {
-        if (text[i] == '\n') {
-            if (line_width > max_width) max_width = line_width;
-            line_width = 0;
-            lines++;
-            continue;
-        }
+    // First pass: measure lines
+    struct Line { int start; int len; };
+    static Line lines[256];
+    int n_lines = 0;
+    int max_cols = wrap > 0 ? (int)(wrap / CELL_W) : 1024;
 
-        line_width++;
-        if (wrap > 0 && line_width >= max_chars) {
-            if (line_width > max_width) max_width = line_width;
-            line_width = 0;
-            lines++;
+    int line_start = 0;
+    int line_len   = 0;
+    for (int i = 0; i <= text_len; i++) {
+        char c = (i < text_len) ? text[i] : '\n';
+        if (c == '\n' || line_len >= max_cols) {
+            if (n_lines < 256) { lines[n_lines].start = line_start; lines[n_lines].len = line_len; n_lines++; }
+            line_start = i + (c == '\n' ? 1 : 0);
+            line_len   = (c == '\n') ? 0 : 1;
+        } else {
+            line_len++;
         }
     }
+    if (n_lines == 0) { lines[0].start = 0; lines[0].len = 0; n_lines = 1; }
 
-    if (line_width > max_width) max_width = line_width;
-    if (max_width <= 0) max_width = 1;
-    if (lines <= 0) lines = 1;
+    int max_line = 0;
+    for (int i = 0; i < n_lines; i++) if (lines[i].len > max_line) max_line = lines[i].len;
+    if (max_line < 1) max_line = 1;
 
-    SDL_Surface* surf = SDL_CreateRGBSurface(0, max_width * 8, lines * 16, 32, 0, 0, 0, 0);
-    if (!surf || !surf->pixels) return surf;
+    int surf_w = max_line * CELL_W;
+    int surf_h = n_lines * CELL_H;
 
-    uint32_t color = (0xFFu << 24) | (fg.r << 16) | (fg.g << 8) | fg.b;
-    uint32_t* pixels = (uint32_t*)surf->pixels;
-    int total = surf->w * surf->h;
-    for (int i = 0; i < total; i++) {
-        pixels[i] = color;
+    SDL_Surface* surf = SDL_CreateRGBSurface(0, surf_w, surf_h, 32,
+        0xFF000000u, 0x00FF0000u, 0x0000FF00u, 0x000000FFu);
+    if (!surf) return nullptr;
+
+    uint32_t* px = (uint32_t*)surf->pixels;
+    int stride   = surf->pitch / 4;
+
+    // Clear to transparent black
+    for (int i = 0; i < surf_h * stride; i++) px[i] = 0x00000000u;
+
+    uint32_t fg_px = ((uint32_t)fg.r << 24) | ((uint32_t)fg.g << 16) |
+                     ((uint32_t)fg.b <<  8) | 0xFFu;
+
+    for (int li = 0; li < n_lines; li++) {
+        int row_y = li * CELL_H;
+        for (int ci = 0; ci < lines[li].len; ci++) {
+            unsigned char c = (unsigned char)text[lines[li].start + ci];
+            if (c < 32 || c > 126) c = '?';
+            const uint8_t* glyph = font8x8[c - 32];
+            int cx = ci * CELL_W;
+            for (int gy = 0; gy < 8; gy++) {
+                uint8_t row_bits = glyph[gy];
+                for (int gx = 0; gx < 8; gx++) {
+                    if (row_bits & (0x80u >> gx)) {
+                        // Draw pixel at (cx+gx, row_y + gy*2) and (gy*2+1) for 2x height
+                        int px_x = cx + gx;
+                        int py0  = row_y + gy * 2;
+                        int py1  = py0 + 1;
+                        if (px_x < surf_w && py0 < surf_h) px[py0 * stride + px_x] = fg_px;
+                        if (px_x < surf_w && py1 < surf_h) px[py1 * stride + px_x] = fg_px;
+                    }
+                }
+            }
+        }
     }
 
     return surf;
@@ -128,232 +280,55 @@ static SDL_Surface* create_text_surface(const char* text, SDL_Color fg, uint32_t
 
 #define BACKBUFFER_W 640
 #define BACKBUFFER_H 480
-#define BACKBUFFER_SIZE (BACKBUFFER_W * BACKBUFFER_H * 4)
 
 static bool sdl_initialized = false;
 static SDL_Window* sdl_window = NULL;
 static SDL_Renderer* sdl_renderer = NULL;
 static SDL_Surface* screen_surface = NULL;
 static void* fifo_buffer = NULL;
-static int frame_count = 0;
 
-static void blit_rgba8(const uint32_t* src, int src_w, int src_h, const SDL_Rect* srcrect,
-                       uint32_t* dst, int dst_w, int dst_h, const SDL_Rect* dstrect)
+// Minimal CPU surface blitter used by SDL_BlitSurface (surface-to-surface only).
+static void blit_surface_cpu(const uint32_t* src, int src_w, int src_h, const SDL_Rect* srcrect,
+                              uint32_t* dst, int dst_w, int dst_h, SDL_Rect* dstrect)
 {
     int sx = srcrect ? srcrect->x : 0;
     int sy = srcrect ? srcrect->y : 0;
     int sw = srcrect ? srcrect->w : src_w;
     int sh = srcrect ? srcrect->h : src_h;
-
     int dx = dstrect ? dstrect->x : 0;
     int dy = dstrect ? dstrect->y : 0;
     int dw = dstrect ? dstrect->w : sw;
     int dh = dstrect ? dstrect->h : sh;
 
-    if (dx >= (int)dst_w || dy >= (int)dst_h) return;
+    if (dx >= dst_w || dy >= dst_h) return;
     if (sx >= src_w || sy >= src_h) return;
-
     if (dx + dw <= 0 || dy + dh <= 0) return;
     if (sx + sw <= 0 || sy + sh <= 0) return;
-
     if (dx < 0) { sx -= dx; sw += dx; dx = 0; }
     if (dy < 0) { sy -= dy; sh += dy; dy = 0; }
-    if (dx + dw > (int)dst_w) { sw -= (dx + dw - dst_w); dw = dst_w - dx; }
-    if (dy + dh > (int)dst_h) { sh -= (dy + dh - dst_h); dh = dst_h - dy; }
-
+    if (dx + dw > dst_w) { sw -= (dx + dw - dst_w); dw = dst_w - dx; }
+    if (dy + dh > dst_h) { sh -= (dy + dh - dst_h); dh = dst_h - dy; }
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
 
-    auto blend_pixel = [](uint32_t src_px, uint32_t dst_px) {
-        uint8_t src_a = src_px & 0xFF;
-        if (src_a == 0) return dst_px;
-        if (src_a == 255) return src_px;
-
-        uint8_t src_r = (src_px >> 24) & 0xFF;
-        uint8_t src_g = (src_px >> 16) & 0xFF;
-        uint8_t src_b = (src_px >> 8) & 0xFF;
-        uint8_t dst_r = (dst_px >> 24) & 0xFF;
-        uint8_t dst_g = (dst_px >> 16) & 0xFF;
-        uint8_t dst_b = (dst_px >> 8) & 0xFF;
-        uint8_t out_a = src_a + (uint8_t)((((int)(dst_px & 0xFF)) * (255 - src_a)) / 255);
-        uint8_t out_r = (uint8_t)((src_r * src_a + dst_r * (255 - src_a)) / 255);
-        uint8_t out_g = (uint8_t)((src_g * src_a + dst_g * (255 - src_a)) / 255);
-        uint8_t out_b = (uint8_t)((src_b * src_a + dst_b * (255 - src_a)) / 255);
-        return ((uint32_t)out_r << 24) | ((uint32_t)out_g << 16) | ((uint32_t)out_b << 8) | out_a;
-    };
-
-    if (sw == dw && sh == dh) {
-        for (int y = 0; y < dh; y++) {
-            const uint32_t* s = src + (sy + y) * src_w + sx;
-            uint32_t* d = dst + (dy + y) * dst_w + dx;
-            for (int x = 0; x < dw; x++) {
-                d[x] = blend_pixel(s[x], d[x]);
-            }
-        }
-    } else {
-        float xscale = (float)sw / dw;
-        float yscale = (float)sh / dh;
-        for (int y = 0; y < dh; y++) {
-            int src_y = sy + (int)(y * yscale);
-            if (src_y >= src_h) src_y = src_h - 1;
-            uint32_t* d = dst + (dy + y) * dst_w + dx;
-            for (int x = 0; x < dw; x++) {
-                int src_x = sx + (int)(x * xscale);
-                if (src_x >= src_w) src_x = src_w - 1;
-                d[x] = blend_pixel(src[src_y * src_w + src_x], d[x]);
-            }
+    int copy_w = sw < dw ? sw : dw;
+    int copy_h = sh < dh ? sh : dh;
+    for (int y = 0; y < copy_h; y++) {
+        const uint32_t* s = src + (sy + y) * src_w + sx;
+        uint32_t* d = dst + (dy + y) * dst_w + dx;
+        for (int x = 0; x < copy_w; x++) {
+            uint32_t p = s[x];
+            uint8_t a = p & 0xFF;
+            if (a == 0) continue;
+            if (a == 255) { d[x] = p; continue; }
+            uint8_t sr = (p >> 24) & 0xFF, sg = (p >> 16) & 0xFF, sb = (p >> 8) & 0xFF;
+            uint32_t q = d[x];
+            uint8_t dr = (q >> 24) & 0xFF, dg = (q >> 16) & 0xFF, db = (q >> 8) & 0xFF;
+            d[x] = ((uint32_t)((sr * a + dr * (255 - a)) / 255) << 24) |
+                   ((uint32_t)((sg * a + dg * (255 - a)) / 255) << 16) |
+                   ((uint32_t)((sb * a + db * (255 - a)) / 255) <<  8) |
+                   (uint32_t)(a + (uint8_t)(((int)(q & 0xFF)) * (255 - a) / 255));
         }
     }
-}
-
-static void blit_surface_rgba8(const uint32_t* src, int src_w, int src_h, const SDL_Rect* srcrect,
-                               uint32_t* dst, int dst_w, int dst_h, SDL_Rect* dstrect)
-{
-    int sx = srcrect ? srcrect->x : 0;
-    int sy = srcrect ? srcrect->y : 0;
-    int sw = srcrect ? srcrect->w : src_w;
-    int sh = srcrect ? srcrect->h : src_h;
-
-    if (dstrect) {
-        int dx = dstrect->x;
-        int dy = dstrect->y;
-        int dw = dstrect->w;
-        int dh = dstrect->h;
-
-        if (dx >= (int)dst_w || dy >= (int)dst_h) return;
-        if (sx >= src_w || sy >= src_h) return;
-        if (dx + dw <= 0 || dy + dh <= 0) return;
-        if (sx + sw <= 0 || sy + sh <= 0) return;
-
-        if (dx < 0) { sx -= dx; sw += dx; dx = 0; }
-        if (dy < 0) { sy -= dy; sh += dy; dy = 0; }
-        if (dx + dw > (int)dst_w) { sw -= (dx + dw - dst_w); dw = dst_w - dx; }
-        if (dy + dh > (int)dst_h) { sh -= (dy + dh - dst_h); dh = dst_h - dy; }
-
-        if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
-
-        auto blend_pixel = [](uint32_t src_px, uint32_t dst_px) {
-            uint8_t src_a = src_px & 0xFF;
-            if (src_a == 0) return dst_px;
-            if (src_a == 255) return src_px;
-
-            uint8_t src_r = (src_px >> 24) & 0xFF;
-            uint8_t src_g = (src_px >> 16) & 0xFF;
-            uint8_t src_b = (src_px >> 8) & 0xFF;
-            uint8_t dst_r = (dst_px >> 24) & 0xFF;
-            uint8_t dst_g = (dst_px >> 16) & 0xFF;
-            uint8_t dst_b = (dst_px >> 8) & 0xFF;
-            uint8_t out_a = src_a + (uint8_t)((((int)(dst_px & 0xFF)) * (255 - src_a)) / 255);
-            uint8_t out_r = (uint8_t)((src_r * src_a + dst_r * (255 - src_a)) / 255);
-            uint8_t out_g = (uint8_t)((src_g * src_a + dst_g * (255 - src_a)) / 255);
-            uint8_t out_b = (uint8_t)((src_b * src_a + dst_b * (255 - src_a)) / 255);
-            return ((uint32_t)out_r << 24) | ((uint32_t)out_g << 16) | ((uint32_t)out_b << 8) | out_a;
-        };
-
-        if (sw == dw && sh == dh) {
-            for (int y = 0; y < dh; y++) {
-                const uint32_t* s = src + (sy + y) * src_w + sx;
-                uint32_t* d = dst + (dy + y) * dst_w + dx;
-                for (int x = 0; x < dw; x++) {
-                    d[x] = blend_pixel(s[x], d[x]);
-                }
-            }
-        } else {
-            float xscale = (float)sw / dw;
-            float yscale = (float)sh / dh;
-            for (int y = 0; y < dh; y++) {
-                int src_y = sy + (int)(y * yscale);
-                if (src_y >= src_h) src_y = src_h - 1;
-                uint32_t* d = dst + (dy + y) * dst_w + dx;
-                for (int x = 0; x < dw; x++) {
-                    int src_x = sx + (int)(x * xscale);
-                    if (src_x >= src_w) src_x = src_w - 1;
-                    d[x] = blend_pixel(src[src_y * src_w + src_x], d[x]);
-                }
-            }
-        }
-    } else {
-        int dx = 0, dy = 0;
-        int dw = sw, dh = sh;
-        if (dx >= (int)dst_w || dy >= (int)dst_h) return;
-        if (sx >= src_w || sy >= src_h) return;
-        if (dx + dw <= 0 || dy + dh <= 0) return;
-        if (sx + sw <= 0 || sy + sh <= 0) return;
-        if (dx < 0) { sx -= dx; sw += dx; dx = 0; }
-        if (dy < 0) { sy -= dy; sh += dy; dy = 0; }
-        if (dx + dw > (int)dst_w) { sw -= (dx + dw - dst_w); dw = dst_w - dx; }
-        if (dy + dh > (int)dst_h) { sh -= (dy + dh - dst_h); dh = dst_h - dy; }
-        if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
-        for (int y = 0; y < dh; y++) {
-            const uint32_t* s = src + (sy + y) * src_w + sx;
-            uint32_t* d = dst + (dy + y) * dst_w + dx;
-            for (int x = 0; x < dw; x++) {
-                uint32_t src_px = s[x];
-                uint8_t src_a = src_px & 0xFF;
-                if (src_a == 0) continue;
-                if (src_a == 255) {
-                    d[x] = src_px;
-                    continue;
-                }
-                uint8_t src_r = (src_px >> 24) & 0xFF;
-                uint8_t src_g = (src_px >> 16) & 0xFF;
-                uint8_t src_b = (src_px >> 8) & 0xFF;
-                uint32_t dst_px = d[x];
-                uint8_t dst_r = (dst_px >> 24) & 0xFF;
-                uint8_t dst_g = (dst_px >> 16) & 0xFF;
-                uint8_t dst_b = (dst_px >> 8) & 0xFF;
-                uint8_t out_a = src_a + (uint8_t)((((int)(dst_px & 0xFF)) * (255 - src_a)) / 255);
-                uint8_t out_r = (uint8_t)((src_r * src_a + dst_r * (255 - src_a)) / 255);
-                uint8_t out_g = (uint8_t)((src_g * src_a + dst_g * (255 - src_a)) / 255);
-                uint8_t out_b = (uint8_t)((src_b * src_a + dst_b * (255 - src_a)) / 255);
-                d[x] = ((uint32_t)out_r << 24) | ((uint32_t)out_g << 16) | ((uint32_t)out_b << 8) | out_a;
-            }
-        }
-    }
-}
-
-static void draw_quad_scaled(GXRModeObj* vmode, void* fb, uint32_t* tex_data, int tex_w, int tex_h)
-{
-    GX_ClearVtxDesc();
-    GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
-    GX_SetVtxDesc(GX_VA_TEX0, GX_DIRECT);
-
-    GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XY, GX_S16, 0);
-    GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
-
-    GXTexObj texObj;
-    GX_InitTexObj(&texObj, tex_data, tex_w, tex_h, GX_TF_RGBA8, GX_CLAMP, GX_CLAMP, GX_FALSE);
-    GX_LoadTexObj(&texObj, GX_TEXMAP0);
-
-    GX_SetTevOp(GX_TEVSTAGE0, GX_REPLACE);
-    GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL);
-    GX_SetNumChans(0);
-    GX_SetNumTexGens(1);
-    GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
-
-    GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
-    GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
-    GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_SET);
-
-    Mtx44 proj;
-    guOrtho(proj, 0, vmode->xfbHeight, 0, vmode->fbWidth, 0, 1);
-    GX_LoadProjectionMtx(proj, GX_ORTHOGRAPHIC);
-
-    GX_SetViewport(0, 0, vmode->fbWidth, vmode->xfbHeight, 0, 1);
-    GX_SetScissor(0, 0, vmode->fbWidth, vmode->xfbHeight);
-
-    GX_Begin(GX_QUADS, GX_VTXFMT0, 4);
-    GX_Position2s16(0, 0);
-    GX_TexCoord2f32(0.0f, 0.0f);
-    GX_Position2s16(vmode->fbWidth, 0);
-    GX_TexCoord2f32(1.0f, 0.0f);
-    GX_Position2s16(vmode->fbWidth, vmode->xfbHeight);
-    GX_TexCoord2f32(1.0f, 1.0f);
-    GX_Position2s16(0, vmode->xfbHeight);
-    GX_TexCoord2f32(0.0f, 1.0f);
-    GX_End();
-
-    GX_DrawDone();
-    GX_Flush();
 }
 
 int SDL_Init(uint32_t flags) {
@@ -361,6 +336,7 @@ int SDL_Init(uint32_t flags) {
     
     VIDEO_Init();
     PAD_Init();
+    WiiInput::Instance()->Init();
     ensure_pref_path();
     
     fifo_buffer = memalign(32, 256 * 1024);
@@ -391,7 +367,7 @@ void SDL_Quit(void) {
 }
 
 uint32_t SDL_GetTicks(void) {
-    return (uint32_t)(gettime() / 1000ULL);
+    return (uint32_t)ticks_to_millisecs(gettime());
 }
 
 void SDL_Delay(uint32_t ms) {
@@ -443,50 +419,76 @@ SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, int index, uint32_t flags) 
     sdl_renderer->draw_b = 0;
     sdl_renderer->draw_a = 255;
     sdl_renderer->blend_mode = SDL_BLENDMODE_BLEND;
-    sdl_renderer->back_buffer_dirty = false;
     sdl_renderer->current_fb = 0;
     sdl_renderer->video_active = false;
+    sdl_renderer->gx_frame_started = false;
 
     GXRModeObj* rmode = VIDEO_GetPreferredMode(NULL);
     sdl_renderer->vmode = rmode;
 
+    // Configure video output.
+    VIDEO_Configure(rmode);
     u32 fb_size = rmode->fbWidth * rmode->xfbHeight * 2;
     sdl_renderer->frame_buffer[0] = memalign(32, fb_size);
     sdl_renderer->frame_buffer[1] = memalign(32, fb_size);
-    clear_xfb_black(sdl_renderer->frame_buffer[0], rmode->fbWidth, rmode->xfbHeight);
-    clear_xfb_black(sdl_renderer->frame_buffer[1], rmode->fbWidth, rmode->xfbHeight);
+    // YUY2: Y=0,Cb=0,Cr=0 = green in BT.601; fill with 0x00800080 for true black.
+    { u32* p = (u32*)sdl_renderer->frame_buffer[0]; for (u32 i = 0; i < fb_size/4; i++) p[i] = 0x00800080; }
+    { u32* p = (u32*)sdl_renderer->frame_buffer[1]; for (u32 i = 0; i < fb_size/4; i++) p[i] = 0x00800080; }
+    DCFlushRange(sdl_renderer->frame_buffer[0], fb_size);
+    DCFlushRange(sdl_renderer->frame_buffer[1], fb_size);
+    VIDEO_SetNextFramebuffer(sdl_renderer->frame_buffer[0]);
+    VIDEO_SetBlack(false);
+    VIDEO_Flush();
+    VIDEO_WaitVSync();
 
-    sdl_renderer->back_buffer = memalign(32, BACKBUFFER_SIZE);
-    memset(sdl_renderer->back_buffer, 0, BACKBUFFER_SIZE);
-    GX_InitTexObj(&sdl_renderer->back_buffer_tex, sdl_renderer->back_buffer,
-                  BACKBUFFER_W, BACKBUFFER_H, GX_TF_RGBA8, GX_CLAMP, GX_CLAMP, GX_FALSE);
-
-    GX_SetDispCopySrc(0, 0, BACKBUFFER_W, BACKBUFFER_H);
+    // GX display copy setup.
+    // EFB is rendered at fbWidth x efbHeight (e.g. 640x480 for both NTSC and PAL).
+    // YScale converts EFB lines → XFB lines (>1.0 for PAL interlaced).
+    GX_SetDispCopySrc(0, 0, rmode->fbWidth, rmode->efbHeight);
     GX_SetDispCopyDst(rmode->fbWidth, rmode->xfbHeight);
-    GX_SetDispCopyYScale((f32)(rmode->xfbHeight / (f32)BACKBUFFER_H));
+    GX_SetDispCopyYScale(GX_GetYScaleFactor(rmode->efbHeight, rmode->xfbHeight));
     GXColor clear_color = {0, 0, 0, 0xFF};
-    GX_SetCopyClear(clear_color, 0xFF);
+    GX_SetCopyClear(clear_color, 0x00FFFFFF);
     GX_SetCopyFilter(rmode->aa, rmode->sample_pattern, GX_TRUE, rmode->vfilter);
-    GX_SetFieldMode(rmode->field_rendering, ((rmode->viHeight == 2 * rmode->xfbHeight) ? GX_ENABLE : GX_DISABLE));
-
+    GX_SetFieldMode(rmode->field_rendering,
+                    ((rmode->viHeight == 2 * rmode->xfbHeight) ? GX_ENABLE : GX_DISABLE));
     GX_SetPixelFmt(GX_PF_RGB8_Z24, GX_ZC_LINEAR);
     GX_SetCullMode(GX_CULL_NONE);
     GX_SetDispCopyGamma(GX_GM_1_0);
 
+    // Ortho projection: pixel coords (0,0)=(top-left) → (640,480)=(bottom-right).
     Mtx44 proj;
-    guOrtho(proj, 0, rmode->xfbHeight, 0, rmode->fbWidth, 0, 1);
+    guOrtho(proj, 0, BACKBUFFER_H, 0, BACKBUFFER_W, 0, 1);
     GX_LoadProjectionMtx(proj, GX_ORTHOGRAPHIC);
-    GX_SetViewport(0, 0, rmode->fbWidth, rmode->xfbHeight, 0, 1);
-    GX_SetScissor(0, 0, rmode->fbWidth, rmode->xfbHeight);
+    // EFB viewport is always fbWidth x efbHeight (480 for NTSC/PAL progressive).
+    GX_SetViewport(0, 0, rmode->fbWidth, rmode->efbHeight, 0, 1);
+    GX_SetScissor(0, 0, rmode->fbWidth, rmode->efbHeight);
 
-    GX_SetNumChans(1);
+    // Identity model-view matrix — required even for 2D; without this GX
+    // transforms vertices by uninitialised matrix data → blank screen.
+    Mtx mv;
+    guMtxIdentity(mv);
+    GX_LoadPosMtxImm(mv, GX_PNMTX0);
+    GX_SetCurrentMtx(GX_PNMTX0);
+
+    // Default GX state used every frame.
+    GX_SetNumChans(0);
     GX_SetNumTexGens(1);
     GX_SetTevOp(GX_TEVSTAGE0, GX_REPLACE);
-    GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+    GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL);
     GX_SetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
     GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
     GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
-    GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_SET);
+    GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_SET);
+
+    GX_ClearVtxDesc();
+    GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GX_SetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+    GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XY, GX_F32, 0);
+    GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+
+    // Separate colour-only vertex format (for SDL_RenderFillRect).
+    GX_SetVtxAttrFmt(GX_VTXFMT1, GX_VA_POS, GX_POS_XY, GX_F32, 0);
 
     GX_InvVtxCache();
     GX_InvalidateTexAll();
@@ -496,10 +498,6 @@ SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, int index, uint32_t flags) 
 
 void SDL_DestroyRenderer(SDL_Renderer* renderer) {
     if (renderer) {
-        if (renderer->back_buffer) {
-            free(renderer->back_buffer);
-            renderer->back_buffer = NULL;
-        }
         if (renderer->frame_buffer[0]) {
             free(renderer->frame_buffer[0]);
             renderer->frame_buffer[0] = NULL;
@@ -522,119 +520,194 @@ int SDL_RenderSetLogicalSize(SDL_Renderer* renderer, int w, int h) {
 }
 
 void SDL_RenderClear(SDL_Renderer* renderer) {
-    if (renderer && renderer->back_buffer) {
-        uint32_t color = (renderer->draw_r << 24) | (renderer->draw_g << 16) |
-                         (renderer->draw_b << 8) | renderer->draw_a;
-        uint32_t* buf = (uint32_t*)renderer->back_buffer;
-        for (int i = 0; i < BACKBUFFER_W * BACKBUFFER_H; i++) {
-            buf[i] = color;
-        }
-        renderer->back_buffer_dirty = true;
-    }
+    if (!renderer || !renderer->vmode) return;
+
+    GXColor cc = { renderer->draw_r, renderer->draw_g, renderer->draw_b, renderer->draw_a };
+    GX_SetCopyClear(cc, 0x00FFFFFF);
+
+    // Invalidate texture cache and restart vertex pipeline for this frame.
+    GX_InvVtxCache();
+    GX_InvalidateTexAll();
+    renderer->gx_frame_started = true;
 }
 
-static void copy_backbuffer_to_fb(SDL_Renderer* renderer) {
-    GXRModeObj* rmode = renderer->vmode;
+// Draw one textured quad from (sx,sy,sw,sh) in texture space to (dx,dy,dw,dh) in screen space.
+// tex_w/tex_h are the actual tiled texture dimensions (padded to multiple of 4).
+static void gx_draw_textured_quad(SDL_Texture* texture,
+                                   float sx, float sy, float sw, float sh,
+                                   float dx, float dy, float dw, float dh)
+{
+    GX_LoadTexObj(&texture->texObj, GX_TEXMAP0);
+
+    int tw = gx_pad4(texture->w);
+    int th = gx_pad4(texture->h);
+    float u0 = sx / tw;
+    float v0 = sy / th;
+    float u1 = (sx + sw) / tw;
+    float v1 = (sy + sh) / th;
+
+    float x0 = dx,      y0 = dy;
+    float x1 = dx + dw, y1 = dy + dh;
+
+    GX_Begin(GX_QUADS, GX_VTXFMT0, 4);
+    GX_Position2f32(x0, y0); GX_TexCoord2f32(u0, v0);
+    GX_Position2f32(x1, y0); GX_TexCoord2f32(u1, v0);
+    GX_Position2f32(x1, y1); GX_TexCoord2f32(u1, v1);
+    GX_Position2f32(x0, y1); GX_TexCoord2f32(u0, v1);
+    GX_End();
+}
+
+void SDL_RenderPresent(SDL_Renderer* renderer) {
+    if (!renderer || !renderer->vmode) return;
+
+    GX_DrawDone();
+
     void* fb = renderer->frame_buffer[renderer->current_fb];
-    uint32_t* bb = (uint32_t*)renderer->back_buffer;
-    u16* xfb = (u16*)fb;
+    GX_CopyDisp(fb, GX_TRUE);
+    GX_Flush();
 
-    for (int y = 0; y < BACKBUFFER_H; y++) {
-        for (int x = 0; x < BACKBUFFER_W; x += 2) {
-            uint32_t px0 = bb[y * BACKBUFFER_W + x];
-            uint32_t px1 = bb[y * BACKBUFFER_W + x + 1];
-
-            u8 r0 = (px0 >> 24) & 0xFF;
-            u8 g0 = (px0 >> 16) & 0xFF;
-            u8 b0 = (px0 >> 8) & 0xFF;
-            u8 r1 = (px1 >> 24) & 0xFF;
-            u8 g1 = (px1 >> 16) & 0xFF;
-            u8 b1 = (px1 >> 8) & 0xFF;
-
-            u8 y0, cb0, cr0;
-            u8 y1, cb1, cr1;
-            rgb_to_ycbcr(r0, g0, b0, &y0, &cb0, &cr0);
-            rgb_to_ycbcr(r1, g1, b1, &y1, &cb1, &cr1);
-
-            u8 cb = (u8)(((int)cb0 + (int)cb1) / 2);
-            u8 cr = (u8)(((int)cr0 + (int)cr1) / 2);
-            int out = y * rmode->fbWidth + x;
-            xfb[out] = (y0 << 8) | cb;
-            xfb[out + 1] = (y1 << 8) | cr;
-        }
-    }
-
-    DCFlushRange(fb, rmode->fbWidth * rmode->xfbHeight * 2);
     VIDEO_SetNextFramebuffer(fb);
     renderer->video_active = true;
     VIDEO_Flush();
     VIDEO_WaitVSync();
 
     renderer->current_fb = 1 - renderer->current_fb;
+    renderer->gx_frame_started = false;
+
+    // Allow next frame's first SDL_PollEvent call to re-scan hardware.
+    extern bool input_polled_this_frame;
+    input_polled_this_frame = false;
 }
 
-void SDL_RenderPresent(SDL_Renderer* renderer) {
-    if (renderer && renderer->back_buffer && renderer->vmode) {
-        copy_backbuffer_to_fb(renderer);
-    }
-}
+int SDL_RenderCopy(SDL_Renderer* renderer, SDL_Texture* texture,
+                   const SDL_Rect* srcrect, const SDL_Rect* dstrect) {
+    if (!renderer || !texture || !texture->gx_buffer) return -1;
 
-int SDL_RenderCopy(SDL_Renderer* renderer, SDL_Texture* texture, const SDL_Rect* srcrect, const SDL_Rect* dstrect) {
-    if (!renderer || !renderer->back_buffer) return -1;
-    if (!texture || !texture->buffer) return 0;
+    float sx = srcrect ? (float)srcrect->x : 0.0f;
+    float sy = srcrect ? (float)srcrect->y : 0.0f;
+    float sw = srcrect ? (float)srcrect->w : (float)texture->w;
+    float sh = srcrect ? (float)srcrect->h : (float)texture->h;
 
-    SDL_Rect src, dst;
-    if (srcrect) {
-        src = *srcrect;
+    float dx = dstrect ? (float)dstrect->x : 0.0f;
+    float dy = dstrect ? (float)dstrect->y : 0.0f;
+    float dw = dstrect ? (float)dstrect->w : sw;
+    float dh = dstrect ? (float)dstrect->h : sh;
+
+    // Apply blend mode — most game textures need alpha blending.
+    if (texture->blend_mode == SDL_BLENDMODE_NONE) {
+        GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_SET);
     } else {
-        src.x = 0; src.y = 0; src.w = texture->w; src.h = texture->h;
+        GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_SET);
     }
 
-    if (dstrect) {
-        dst = *dstrect;
-    } else {
-        dst.x = 0; dst.y = 0; dst.w = renderer->logical_width; dst.h = renderer->logical_height;
-    }
+    // TEV: textured, no vertex colour channel.
+    GX_SetNumChans(0);
+    GX_SetTevOp(GX_TEVSTAGE0, GX_REPLACE);
+    GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL);
 
-    uint32_t* tex_pixels = (uint32_t*)texture->buffer;
-    uint32_t* bb_pixels = (uint32_t*)renderer->back_buffer;
+    gx_draw_textured_quad(texture, sx, sy, sw, sh, dx, dy, dw, dh);
 
-    blit_rgba8(tex_pixels, texture->w, texture->h, &src,
-               bb_pixels, BACKBUFFER_W, BACKBUFFER_H, &dst);
-
-    renderer->back_buffer_dirty = true;
     return 0;
 }
 
-int SDL_RenderCopyEx(SDL_Renderer* renderer, SDL_Texture* texture, const SDL_Rect* srcrect, const SDL_Rect* dstrect, double angle, const SDL_Point* center, int flip) {
-    return SDL_RenderCopy(renderer, texture, srcrect, dstrect);
+int SDL_RenderCopyEx(SDL_Renderer* renderer, SDL_Texture* texture,
+                     const SDL_Rect* srcrect, const SDL_Rect* dstrect,
+                     double angle, const SDL_Point* center, int flip) {
+    if (!renderer || !texture || !texture->gx_buffer) return -1;
+
+    float sx = srcrect ? (float)srcrect->x : 0.0f;
+    float sy = srcrect ? (float)srcrect->y : 0.0f;
+    float sw = srcrect ? (float)srcrect->w : (float)texture->w;
+    float sh = srcrect ? (float)srcrect->h : (float)texture->h;
+
+    float dx = dstrect ? (float)dstrect->x : 0.0f;
+    float dy = dstrect ? (float)dstrect->y : 0.0f;
+    float dw = dstrect ? (float)dstrect->w : sw;
+    float dh = dstrect ? (float)dstrect->h : sh;
+
+    // Apply blend mode
+    if (texture->blend_mode == SDL_BLENDMODE_NONE) {
+        GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_SET);
+    } else {
+        GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_SET);
+    }
+
+    GX_SetNumChans(0);
+    GX_SetTevOp(GX_TEVSTAGE0, GX_REPLACE);
+    GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL);
+    GX_LoadTexObj(&texture->texObj, GX_TEXMAP0);
+
+    int tw = gx_pad4(texture->w);
+    int th = gx_pad4(texture->h);
+    float u0 = sx / tw, v0 = sy / th;
+    float u1 = (sx + sw) / tw, v1 = (sy + sh) / th;
+
+    // Pivot in screen space (SDL center coords are relative to dstrect origin)
+    float px = dx + (center ? (float)center->x : dw * 0.5f);
+    float py = dy + (center ? (float)center->y : dh * 0.5f);
+
+    // SDL convention: positive angle = clockwise in screen space (y-down).
+    // Standard 2-D rotation in screen coords: CW = positive, y-down.
+    // x' = (x-px)*cos - (y-py)*sin + px
+    // y' = (x-px)*sin + (y-py)*cos + py
+    float rad = (float)(angle * M_PI / 180.0);
+    float c = cosf(rad), s = sinf(rad);
+
+    // Corner offsets from pivot
+    float cx0 = dx      - px,  cy0 = dy      - py;
+    float cx1 = dx + dw - px,  cy1 = dy + dh - py;
+
+    // Rotated corners: TL, TR, BR, BL
+    float x00 = cx0*c - cy0*s + px,  y00 = cx0*s + cy0*c + py;
+    float x10 = cx1*c - cy0*s + px,  y10 = cx1*s + cy0*c + py;
+    float x11 = cx1*c - cy1*s + px,  y11 = cx1*s + cy1*c + py;
+    float x01 = cx0*c - cy1*s + px,  y01 = cx0*s + cy1*c + py;
+
+    GX_Begin(GX_QUADS, GX_VTXFMT0, 4);
+    GX_Position2f32(x00, y00); GX_TexCoord2f32(u0, v0);
+    GX_Position2f32(x10, y10); GX_TexCoord2f32(u1, v0);
+    GX_Position2f32(x11, y11); GX_TexCoord2f32(u1, v1);
+    GX_Position2f32(x01, y01); GX_TexCoord2f32(u0, v1);
+    GX_End();
+
+    return 0;
 }
 
 void SDL_RenderFillRect(SDL_Renderer* renderer, const SDL_Rect* rect) {
-    if (!renderer || !renderer->back_buffer) return;
+    if (!renderer) return;
 
-    uint32_t color = (renderer->draw_r << 24) | (renderer->draw_g << 16) |
-                     (renderer->draw_b << 8) | renderer->draw_a;
+    float x0 = rect ? (float)rect->x : 0.0f;
+    float y0 = rect ? (float)rect->y : 0.0f;
+    float x1 = rect ? (float)(rect->x + rect->w) : (float)BACKBUFFER_W;
+    float y1 = rect ? (float)(rect->y + rect->h) : (float)BACKBUFFER_H;
 
-    int x = rect ? rect->x : 0;
-    int y = rect ? rect->y : 0;
-    int w = rect ? rect->w : BACKBUFFER_W;
-    int h = rect ? rect->h : BACKBUFFER_H;
+    // Use a colour-only TEV pass.
+    GX_SetNumChans(1);
+    GX_SetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
+    GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+    GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_SET);
 
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > BACKBUFFER_W) w = BACKBUFFER_W - x;
-    if (y + h > BACKBUFFER_H) h = BACKBUFFER_H - y;
-    if (w <= 0 || h <= 0) return;
+    GXColor col = { renderer->draw_r, renderer->draw_g, renderer->draw_b, renderer->draw_a };
+    GX_SetChanMatColor(GX_COLOR0A0, col);
 
-    uint32_t* buf = (uint32_t*)renderer->back_buffer;
-    for (int row = 0; row < h; row++) {
-        uint32_t* line = buf + (y + row) * BACKBUFFER_W + x;
-        for (int col = 0; col < w; col++) {
-            line[col] = color;
-        }
-    }
-    renderer->back_buffer_dirty = true;
+    GX_ClearVtxDesc();
+    GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GX_SetVtxAttrFmt(GX_VTXFMT1, GX_VA_POS, GX_POS_XY, GX_F32, 0);
+
+    GX_Begin(GX_QUADS, GX_VTXFMT1, 4);
+    GX_Position2f32(x0, y0);
+    GX_Position2f32(x1, y0);
+    GX_Position2f32(x1, y1);
+    GX_Position2f32(x0, y1);
+    GX_End();
+
+    // Restore standard textured vertex desc for subsequent SDL_RenderCopy calls.
+    GX_ClearVtxDesc();
+    GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GX_SetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+    GX_SetNumChans(0);
+    GX_SetTevOp(GX_TEVSTAGE0, GX_REPLACE);
+    GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL);
 }
 
 void SDL_SetRenderDrawColor(SDL_Renderer* renderer, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -660,19 +733,29 @@ SDL_Texture* SDL_CreateTexture(SDL_Renderer* renderer, uint32_t format, int acce
     tex->format = format;
     tex->access = access;
     tex->renderer = renderer;
+    tex->blend_mode = SDL_BLENDMODE_BLEND;
+
+    // Linear staging buffer for CPU writes.
     tex->buffer = memalign(32, w * h * 4);
-    if (!tex->buffer) {
-        delete tex;
-        return NULL;
-    }
+    if (!tex->buffer) { delete tex; return NULL; }
     memset(tex->buffer, 0, w * h * 4);
-    GX_InitTexObj(&tex->texObj, tex->buffer, w, h, GX_TF_RGBA8, GX_CLAMP, GX_CLAMP, GX_FALSE);
+
+    // GX tiled buffer — dimensions padded to multiple of 4.
+    int pw = gx_pad4(w);
+    int ph = gx_pad4(h);
+    tex->gx_buffer = memalign(32, pw * ph * 4);
+    if (!tex->gx_buffer) { free(tex->buffer); delete tex; return NULL; }
+    memset(tex->gx_buffer, 0, pw * ph * 4);
+    DCFlushRange(tex->gx_buffer, pw * ph * 4);
+
+    GX_InitTexObj(&tex->texObj, tex->gx_buffer, pw, ph, GX_TF_RGBA8, GX_CLAMP, GX_CLAMP, GX_FALSE);
     return tex;
 }
 
 SDL_Texture* SDL_CreateTextureFromSurface(SDL_Renderer* renderer, SDL_Surface* surface) {
     if (!surface || !surface->pixels) return NULL;
-    SDL_Texture* tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STATIC, surface->w, surface->h);
+    SDL_Texture* tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+                                          SDL_TEXTUREACCESS_STATIC, surface->w, surface->h);
     if (!tex) return NULL;
     SDL_UpdateTexture(tex, NULL, surface->pixels, surface->pitch);
     return tex;
@@ -680,24 +763,51 @@ SDL_Texture* SDL_CreateTextureFromSurface(SDL_Renderer* renderer, SDL_Surface* s
 
 void SDL_DestroyTexture(SDL_Texture* texture) {
     if (texture) {
-        if (texture->buffer) {
-            free(texture->buffer);
-        }
+        if (texture->buffer) { free(texture->buffer); }
+        if (texture->gx_buffer) { free(texture->gx_buffer); }
         delete texture;
     }
 }
 
 int SDL_UpdateTexture(SDL_Texture* texture, const SDL_Rect* rect, const void* pixels, int pitch) {
     if (!texture || !texture->buffer || !pixels) return -1;
+
+    // Copy into linear staging buffer.
     const uint8_t* src = (const uint8_t*)pixels;
     uint8_t* dst = (uint8_t*)texture->buffer;
     int row_bytes = texture->w * 4;
     for (int y = 0; y < texture->h; y++) {
         memcpy(dst + y * row_bytes, src + y * pitch, row_bytes);
     }
-    GX_InitTexObj(&texture->texObj, texture->buffer, texture->w, texture->h, GX_TF_RGBA8, GX_CLAMP, GX_CLAMP, GX_FALSE);
+
+    // Tile into gx_buffer.
+    // If w/h are not multiples of 4 we need to blit into a padded scratch
+    // before tiling. We use a local stack buffer for small textures and
+    // heap for large ones; easiest approach is always pad into gx_buffer
+    // by building a padded linear image first.
+    int pw = gx_pad4(texture->w);
+    int ph = gx_pad4(texture->h);
+    size_t padded_size = pw * ph * 4;
+
+    // Allocate temporary padded image (stack is fine for small textures,
+    // but textures can be large so use heap).
+    uint32_t* padded = (uint32_t*)malloc(padded_size);
+    if (!padded) return -1;
+    memset(padded, 0, padded_size);
+    const uint32_t* lin = (const uint32_t*)texture->buffer;
+    for (int y = 0; y < texture->h; y++) {
+        memcpy(padded + y * pw, lin + y * texture->w, texture->w * 4);
+    }
+
+    tile_rgba8(padded, pw, ph, (uint8_t*)texture->gx_buffer);
+    free(padded);
+
+    DCFlushRange(texture->gx_buffer, padded_size);
+    GX_InitTexObj(&texture->texObj, texture->gx_buffer, pw, ph,
+                  GX_TF_RGBA8, GX_CLAMP, GX_CLAMP, GX_FALSE);
     return 0;
 }
+
 
 int SDL_LockTexture(SDL_Texture* texture, const SDL_Rect* rect, void** pixels, int* pitch) {
     return -1;
@@ -727,28 +837,43 @@ int SDL_SetTextureAlphaMod(SDL_Texture* texture, uint8_t alpha) {
 
 static bool fat_initialized = false;
 static uint8_t keyboard_state[256] = {0};
-static void refresh_keyboard_state(void) {
-    WPAD_ScanPads();
-    PAD_ScanPads();
+
+// Update keyboard_state from the already-polled WPAD and GC pad.
+// Must only be called AFTER WPAD_ScanPads() and PAD_ScanPads() have run for this frame.
+static void update_keyboard_state_from_input(void) {
     memset(keyboard_state, 0, sizeof(keyboard_state));
 
-    u16 new_gc_buttons = PAD_ButtonsHeld(0);
-    if (new_gc_buttons & PAD_BUTTON_LEFT) keyboard_state[SDL_SCANCODE_LEFT] = 1;
-    if (new_gc_buttons & PAD_BUTTON_RIGHT) keyboard_state[SDL_SCANCODE_RIGHT] = 1;
-    if (new_gc_buttons & PAD_BUTTON_UP) keyboard_state[SDL_SCANCODE_UP] = 1;
-    if (new_gc_buttons & PAD_BUTTON_DOWN) keyboard_state[SDL_SCANCODE_DOWN] = 1;
-    if (new_gc_buttons & PAD_BUTTON_A) keyboard_state[SDL_SCANCODE_RETURN] = 1;
+    // GC pad (already scanned this frame) — digital D-pad
+    u16 gc = PAD_ButtonsHeld(0);
+    if (gc & PAD_BUTTON_LEFT)  keyboard_state[SDL_SCANCODE_LEFT]   = 1;
+    if (gc & PAD_BUTTON_RIGHT) keyboard_state[SDL_SCANCODE_RIGHT]  = 1;
+    if (gc & PAD_BUTTON_UP)    keyboard_state[SDL_SCANCODE_UP]     = 1;
+    if (gc & PAD_BUTTON_DOWN)  keyboard_state[SDL_SCANCODE_DOWN]   = 1;
+    if (gc & PAD_BUTTON_A)     keyboard_state[SDL_SCANCODE_RETURN] = 1;
 
-    for (int i = 0; i < 4; i++) {
-        u32 type;
-        if (WPAD_Probe(i, &type) == WPAD_ERR_NONE) {
-            WPADData* data = WPAD_Data(i);
-            u32 new_buttons = data->btns_h;
-            if (new_buttons & WPAD_BUTTON_LEFT) keyboard_state[SDL_SCANCODE_LEFT] = 1;
-            if (new_buttons & WPAD_BUTTON_RIGHT) keyboard_state[SDL_SCANCODE_RIGHT] = 1;
-            if (new_buttons & WPAD_BUTTON_UP) keyboard_state[SDL_SCANCODE_UP] = 1;
-            if (new_buttons & WPAD_BUTTON_DOWN) keyboard_state[SDL_SCANCODE_DOWN] = 1;
-            if ((new_buttons & WPAD_BUTTON_1) || (new_buttons & WPAD_BUTTON_A)) keyboard_state[SDL_SCANCODE_RETURN] = 1;
+    // GC pad — main analog stick (covers users with arrow keys bound to stick)
+    {
+        s8 sx = PAD_StickX(0);
+        s8 sy = PAD_StickY(0);
+        const s8 DEAD = 40;
+        if (sx < -DEAD) keyboard_state[SDL_SCANCODE_LEFT]  = 1;
+        if (sx >  DEAD) keyboard_state[SDL_SCANCODE_RIGHT] = 1;
+        // GC stick Y is +up/-down; SDL UP scancode = up on screen
+        if (sy >  DEAD) keyboard_state[SDL_SCANCODE_UP]    = 1;
+        if (sy < -DEAD) keyboard_state[SDL_SCANCODE_DOWN]  = 1;
+    }
+
+    // Wiimote — horizontal hold (NES-style): d-pad left/right aim, buttons 1/2 fire.
+    // UP/DOWN d-pad are menu-nav edge events; held state not needed for gameplay.
+    {
+        WPADData* wd = WPAD_Data(0);
+        if (wd) {
+            u32 btns = wd->btns_h;
+            if (btns & WPAD_BUTTON_LEFT)  keyboard_state[SDL_SCANCODE_LEFT]   = 1;
+            if (btns & WPAD_BUTTON_RIGHT) keyboard_state[SDL_SCANCODE_RIGHT]  = 1;
+            // Buttons 1 and 2 fire (RETURN held = shooterAction).
+            if (btns & (WPAD_BUTTON_1 | WPAD_BUTTON_2))
+                                          keyboard_state[SDL_SCANCODE_RETURN] = 1;
         }
     }
 }
@@ -761,13 +886,6 @@ static void init_fat(void) {
 static uint8_t *load_file(const char *file, size_t *out_size) {
     init_fat();
     FILE *f = fopen(file, "rb");
-#ifdef WII
-    if (!f && strncmp(file, "sd:/apps/frozenbubble/share/", 27) == 0) {
-        char fallback[768];
-        snprintf(fallback, sizeof(fallback), "/home/davey/frozenbubble/frozen-bubble-sdl2/share/%s", file + 27);
-        f = fopen(fallback, "rb");
-    }
-#endif
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
@@ -906,123 +1024,121 @@ void SDL_GetRGBA(uint32_t pixel, const SDL_PixelFormat* format, uint8_t* r, uint
     if (a) *a = pixel & 0xFF;
 }
 
+// Per-frame event queue — filled once per frame, drained by SDL_PollEvent calls.
+#define EVT_QUEUE_SIZE 16
+static SDL_Event evt_queue[EVT_QUEUE_SIZE];
+static int evt_queue_head = 0;
+static int evt_queue_tail = 0;
+bool input_polled_this_frame = false;
+static u16 gc_held_prev = 0;
+
+static void evt_push(SDL_Event* e) {
+    int next = (evt_queue_tail + 1) % EVT_QUEUE_SIZE;
+    if (next != evt_queue_head) {
+        evt_queue[evt_queue_tail] = *e;
+        evt_queue_tail = next;
+    }
+}
+
+static bool evt_pop(SDL_Event* e) {
+    if (evt_queue_head == evt_queue_tail) return false;
+    *e = evt_queue[evt_queue_head];
+    evt_queue_head = (evt_queue_head + 1) % EVT_QUEUE_SIZE;
+    return true;
+}
+
+static void push_key(SDL_Event* e, SDL_Keycode sym, SDL_Scancode sc) {
+    e->type = SDL_KEYDOWN;
+    e->key.keysym.sym = sym;
+    e->key.keysym.scancode = sc;
+    e->key.state = SDL_PRESSED;
+    e->key.repeat = 0;
+    evt_push(e);
+}
+
+// Previous-frame analog stick state for edge detection (stick entered zone).
+static bool stick_left_prev  = false;
+static bool stick_right_prev = false;
+static bool stick_up_prev    = false;
+static bool stick_down_prev  = false;
+
+// Previous-frame WPAD button state for direct edge detection.
+static u32 wpad_held_prev = 0;
+
+// Called once per frame on the first SDL_PollEvent of each frame.
+static void generate_input_events(void) {
+    WiiInput* wi = WiiInput::Instance();
+    wi->Poll();
+    PAD_ScanPads();
+    WPAD_ScanPads();
+    update_keyboard_state_from_input();
+
+    SDL_Event e;
+    memset(&e, 0, sizeof(e));
+
+    // --- Wiimote via direct WPAD (bypasses WiiInput wrapper) ---
+    {
+        WPADData* wd = WPAD_Data(0);
+        u32 btns_h = wd ? wd->btns_h : 0;
+        u32 btns_just = btns_h & ~wpad_held_prev;
+        wpad_held_prev = btns_h;
+
+        // Home button: return to main menu (not quit to HBC).
+        if (btns_just & WPAD_BUTTON_HOME)  push_key(&e, SDLK_ESCAPE, SDL_SCANCODE_ESCAPE);
+        // Buttons 1 and 2: fire / menu confirm (edge event).
+        if (btns_just & (WPAD_BUTTON_1 | WPAD_BUTTON_2))
+            push_key(&e, SDLK_RETURN, SDL_SCANCODE_RETURN);
+        // All four d-pad directions fire edge events for menu navigation.
+        // Left/right also set held state (via update_keyboard_state_from_input) for gameplay aiming.
+        if (btns_just & WPAD_BUTTON_UP)    push_key(&e, SDLK_UP,    SDL_SCANCODE_UP);
+        if (btns_just & WPAD_BUTTON_DOWN)  push_key(&e, SDLK_DOWN,  SDL_SCANCODE_DOWN);
+        if (btns_just & WPAD_BUTTON_LEFT)  push_key(&e, SDLK_LEFT,  SDL_SCANCODE_LEFT);
+        if (btns_just & WPAD_BUTTON_RIGHT) push_key(&e, SDLK_RIGHT, SDL_SCANCODE_RIGHT);
+    }
+
+    // --- GC pad digital D-pad + Start ---
+    u16 gc_held = PAD_ButtonsHeld(0);
+    u16 gc_just = gc_held & ~gc_held_prev;
+    gc_held_prev = gc_held;
+    if (gc_just & PAD_BUTTON_START)  push_key(&e, SDLK_ESCAPE, SDL_SCANCODE_ESCAPE);
+    if (gc_just & PAD_BUTTON_A)      push_key(&e, SDLK_RETURN, SDL_SCANCODE_RETURN);
+    if (gc_just & PAD_BUTTON_UP)     push_key(&e, SDLK_UP,     SDL_SCANCODE_UP);
+    if (gc_just & PAD_BUTTON_DOWN)   push_key(&e, SDLK_DOWN,   SDL_SCANCODE_DOWN);
+    if (gc_just & PAD_BUTTON_LEFT)   push_key(&e, SDLK_LEFT,   SDL_SCANCODE_LEFT);
+    if (gc_just & PAD_BUTTON_RIGHT)  push_key(&e, SDLK_RIGHT,  SDL_SCANCODE_RIGHT);
+    if (gc_just & PAD_BUTTON_B)      push_key(&e, SDLK_ESCAPE, SDL_SCANCODE_ESCAPE);
+
+    // --- GC pad analog stick — emit edge event when stick enters a zone ---
+    {
+        s8 sx = PAD_StickX(0);
+        s8 sy = PAD_StickY(0);
+        const s8 DEAD = 40;
+        bool sl = sx < -DEAD, sr = sx > DEAD;
+        bool su = sy >  DEAD, sd = sy < -DEAD;
+
+        if (sl && !stick_left_prev)  push_key(&e, SDLK_LEFT,  SDL_SCANCODE_LEFT);
+        if (sr && !stick_right_prev) push_key(&e, SDLK_RIGHT, SDL_SCANCODE_RIGHT);
+        if (su && !stick_up_prev)    push_key(&e, SDLK_UP,    SDL_SCANCODE_UP);
+        if (sd && !stick_down_prev)  push_key(&e, SDLK_DOWN,  SDL_SCANCODE_DOWN);
+
+        stick_left_prev  = sl;
+        stick_right_prev = sr;
+        stick_up_prev    = su;
+        stick_down_prev  = sd;
+    }
+}
+
 int SDL_PollEvent(SDL_Event* event) {
     if (!event) return 0;
-    
-    refresh_keyboard_state();
-    
-    static u32 held_buttons = 0;
-    static u16 gc_held_buttons = 0;
-    u32 new_buttons = 0;
-    u16 new_gc_buttons = PAD_ButtonsHeld(0);
 
-    if (new_gc_buttons & PAD_BUTTON_LEFT) keyboard_state[SDL_SCANCODE_LEFT] = 1;
-    if (new_gc_buttons & PAD_BUTTON_RIGHT) keyboard_state[SDL_SCANCODE_RIGHT] = 1;
-    if (new_gc_buttons & PAD_BUTTON_UP) keyboard_state[SDL_SCANCODE_UP] = 1;
-    if (new_gc_buttons & PAD_BUTTON_DOWN) keyboard_state[SDL_SCANCODE_DOWN] = 1;
-    if (new_gc_buttons & PAD_BUTTON_A) {
-        keyboard_state[SDL_SCANCODE_RETURN] = 1;
+    if (!input_polled_this_frame) {
+        evt_queue_head = 0;
+        evt_queue_tail = 0;
+        generate_input_events();
+        input_polled_this_frame = true;
     }
 
-    for (int i = 0; i < 4; i++) {
-        u32 type;
-        if (WPAD_Probe(i, &type) == WPAD_ERR_NONE) {
-            WPADData* data = WPAD_Data(i);
-            new_buttons = data->btns_h;
-
-            if (new_buttons & WPAD_BUTTON_LEFT) keyboard_state[SDL_SCANCODE_LEFT] = 1;
-            if (new_buttons & WPAD_BUTTON_RIGHT) keyboard_state[SDL_SCANCODE_RIGHT] = 1;
-            if (new_buttons & WPAD_BUTTON_UP) keyboard_state[SDL_SCANCODE_UP] = 1;
-            if (new_buttons & WPAD_BUTTON_DOWN) keyboard_state[SDL_SCANCODE_DOWN] = 1;
-            if ((new_buttons & WPAD_BUTTON_1) || (new_buttons & WPAD_BUTTON_A)) keyboard_state[SDL_SCANCODE_RETURN] = 1;
-
-            if ((new_buttons & (WPAD_BUTTON_1 | WPAD_BUTTON_A)) && !(held_buttons & (WPAD_BUTTON_1 | WPAD_BUTTON_A))) {
-                event->type = SDL_KEYDOWN;
-                event->key.keysym.sym = SDLK_RETURN;
-                event->key.keysym.scancode = SDL_SCANCODE_RETURN;
-                event->key.state = SDL_PRESSED;
-                held_buttons = new_buttons;
-                return 1;
-            }
-            if ((new_buttons & WPAD_BUTTON_UP) && !(held_buttons & WPAD_BUTTON_UP)) {
-                event->type = SDL_KEYDOWN;
-                event->key.keysym.sym = SDLK_UP;
-                event->key.state = SDL_PRESSED;
-                held_buttons = new_buttons;
-                return 1;
-            }
-            if ((new_buttons & WPAD_BUTTON_DOWN) && !(held_buttons & WPAD_BUTTON_DOWN)) {
-                event->type = SDL_KEYDOWN;
-                event->key.keysym.sym = SDLK_DOWN;
-                event->key.state = SDL_PRESSED;
-                held_buttons = new_buttons;
-                return 1;
-            }
-            if ((new_buttons & WPAD_BUTTON_LEFT) && !(held_buttons & WPAD_BUTTON_LEFT)) {
-                event->type = SDL_KEYDOWN;
-                event->key.keysym.sym = SDLK_LEFT;
-                event->key.state = SDL_PRESSED;
-                held_buttons = new_buttons;
-                return 1;
-            }
-            if ((new_buttons & WPAD_BUTTON_RIGHT) && !(held_buttons & WPAD_BUTTON_RIGHT)) {
-                event->type = SDL_KEYDOWN;
-                event->key.keysym.sym = SDLK_RIGHT;
-                event->key.state = SDL_PRESSED;
-                held_buttons = new_buttons;
-                return 1;
-            }
-            if ((new_buttons & WPAD_BUTTON_HOME) && !(held_buttons & WPAD_BUTTON_HOME)) {
-                event->type = SDL_QUIT;
-                return 1;
-            }
-        }
-    }
-
-    if ((new_gc_buttons & PAD_BUTTON_A) && !(gc_held_buttons & PAD_BUTTON_A)) {
-        event->type = SDL_KEYDOWN;
-        event->key.keysym.sym = SDLK_RETURN;
-        event->key.keysym.scancode = SDL_SCANCODE_RETURN;
-        event->key.state = SDL_PRESSED;
-        gc_held_buttons = new_gc_buttons;
-        return 1;
-    }
-    if ((new_gc_buttons & PAD_BUTTON_UP) && !(gc_held_buttons & PAD_BUTTON_UP)) {
-        event->type = SDL_KEYDOWN;
-        event->key.keysym.sym = SDLK_UP;
-        event->key.keysym.scancode = SDL_SCANCODE_UP;
-        event->key.state = SDL_PRESSED;
-        gc_held_buttons = new_gc_buttons;
-        return 1;
-    }
-    if ((new_gc_buttons & PAD_BUTTON_DOWN) && !(gc_held_buttons & PAD_BUTTON_DOWN)) {
-        event->type = SDL_KEYDOWN;
-        event->key.keysym.sym = SDLK_DOWN;
-        event->key.keysym.scancode = SDL_SCANCODE_DOWN;
-        event->key.state = SDL_PRESSED;
-        gc_held_buttons = new_gc_buttons;
-        return 1;
-    }
-    if ((new_gc_buttons & PAD_BUTTON_LEFT) && !(gc_held_buttons & PAD_BUTTON_LEFT)) {
-        event->type = SDL_KEYDOWN;
-        event->key.keysym.sym = SDLK_LEFT;
-        event->key.keysym.scancode = SDL_SCANCODE_LEFT;
-        event->key.state = SDL_PRESSED;
-        gc_held_buttons = new_gc_buttons;
-        return 1;
-    }
-    if ((new_gc_buttons & PAD_BUTTON_RIGHT) && !(gc_held_buttons & PAD_BUTTON_RIGHT)) {
-        event->type = SDL_KEYDOWN;
-        event->key.keysym.sym = SDLK_RIGHT;
-        event->key.keysym.scancode = SDL_SCANCODE_RIGHT;
-        event->key.state = SDL_PRESSED;
-        gc_held_buttons = new_gc_buttons;
-        return 1;
-    }
-    
-    held_buttons = new_buttons;
-    gc_held_buttons = new_gc_buttons;
-    return 0;
+    return evt_pop(event) ? 1 : 0;
 }
 
 int SDL_WaitEvent(SDL_Event* event) {
@@ -1122,8 +1238,8 @@ int SDL_SetSurfaceBlendMode(SDL_Surface* surface, int blendMode) {
 
 int SDL_BlitSurface(SDL_Surface* src, const SDL_Rect* srcrect, SDL_Surface* dst, SDL_Rect* dstrect) {
     if (!src || !dst || !src->pixels || !dst->pixels) return -1;
-    blit_surface_rgba8((uint32_t*)src->pixels, src->w, src->h, srcrect,
-                       (uint32_t*)dst->pixels, dst->w, dst->h, dstrect);
+    blit_surface_cpu((uint32_t*)src->pixels, src->w, src->h, srcrect,
+                     (uint32_t*)dst->pixels, dst->w, dst->h, dstrect);
     return 0;
 }
 
@@ -1132,7 +1248,8 @@ int SDL_BlitScaled(SDL_Surface* src, const SDL_Rect* srcrect, SDL_Surface* dst, 
 }
 
 const uint8_t* SDL_GetKeyboardState(int* numkeys) {
-    refresh_keyboard_state();
+    // keyboard_state is already up-to-date from the last SDL_PollEvent call.
+    // Do NOT re-scan here — that causes mid-frame double-polling.
     if (numkeys) *numkeys = 256;
     return keyboard_state;
 }

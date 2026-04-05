@@ -91,8 +91,7 @@ struct SingleBubble {
     void UpdatePosition() {
         if (launching) {
             oldpos = pos;
-            if (!lowGfx) pos.x -= ((float)BUBBLE_SPEED) * g_motion_scale * cosf(direction);
-            else pos.x += ((float)BUBBLE_SPEED) * g_motion_scale * cosf(direction);
+            pos.x += ((float)BUBBLE_SPEED) * g_motion_scale * cosf(direction);
             pos.y -= ((float)BUBBLE_SPEED) * g_motion_scale * sinf(direction);
             if (pos.x < leftLimit) {
                 AudioMixer::Instance()->PlaySFX("rebound");
@@ -162,31 +161,18 @@ BubbleGame::BubbleGame(const SDL_Renderer *renderer)
     }
 
     BG_DEBUG_STEP("BG ctor: stick fx");
-#ifdef WII
-    for (int i = 0; i <= BUBBLE_STICKFC; i++) {
-        imgBubbleStick[i] = nullptr;
-        imgMiniBubbleStick[i] = nullptr;
-    }
-#else
     for (int i = 0; i <= BUBBLE_STICKFC; i++) {
         sprintf(path, DATA_DIR "/gfx/balls/stick_effect_%d.png", i);
         imgBubbleStick[i] = IMG_LoadTexture(rend, path);
         sprintf(path, DATA_DIR "/gfx/balls/stick_effect_%d-mini.png", i);
         imgMiniBubbleStick[i] = IMG_LoadTexture(rend, path);
     }
-#endif
 
     BG_DEBUG_STEP("BG ctor: pause penguin");
-#ifdef WII
-    for (int i = 0; i < 35; i++) {
-        pausePenguin[i] = nullptr;
-    }
-#else
     for (int i = 0; i < 35; i++) {
         sprintf(path, DATA_DIR "/gfx/pause_%04d.png", i);
         pausePenguin[i] = IMG_LoadTexture(rend, path);
     }
-#endif
 
     imgBubbleFrozen = IMG_LoadTexture(rend, DATA_DIR "/gfx/balls/bubble_lose.png");
     imgMiniBubbleFrozen = IMG_LoadTexture(rend, DATA_DIR "/gfx/balls/bubble_lose-mini.png");
@@ -380,6 +366,25 @@ void BubbleGame::NewGame(SetupSettings setup) {
     SDL_Renderer *rend = const_cast<SDL_Renderer*>(renderer);
     currentSettings = setup;
 
+    // Reset game-over flags so UpdatePenguin and Render work correctly on
+    // re-entry (e.g. player quit a previous game mid-way or after losing).
+    gameFinish = gameWon = gameLost = false;
+    firstRenderDone = false;
+
+    // Discard any in-flight bullets from a previous game. A launching
+    // SingleBubble only marks shouldClear=true on collision — if QuitToTitle
+    // was called while a bullet was airborne it will never collide and will
+    // bounce between the walls forever, keeping newShoot=false and blocking
+    // all future shooting.
+    singleBubbles.clear();
+
+    // Reset per-array transient state that is NOT cleared by SetupGameMetrics.
+    for (int i = 0; i < 2; i++) {
+        bubbleArrays[i].newShoot    = true;
+        bubbleArrays[i].hurryTimer  = 0;
+        bubbleArrays[i].warnTimer   = 0;
+    }
+
     lowGfx = GameSettings::Instance()->gfxLevel() > 2;
     char path[256];
 
@@ -556,7 +561,7 @@ void BubbleGame::UpdatePenguin(BubbleArray &bArray) {
                 if(bArray.warnTimer == 0) audMixer->PlaySFX("hurry");
                 SDL_RenderCopy(const_cast<SDL_Renderer*>(renderer), bArray.hurryTexture, nullptr, &bArray.hurryRct);
             }
-            bArray.warnTimer++;
+            bArray.warnTimer += g_motion_step;
             if (bArray.warnTimer > HURRY_WARN_FC) {
                 bArray.warnTimer = 0;
             }
@@ -571,7 +576,7 @@ void BubbleGame::UpdatePenguin(BubbleArray &bArray) {
                 if(bArray.warnTimer == 0) audMixer->PlaySFX("hurry");
                 SDL_RenderCopy(const_cast<SDL_Renderer*>(renderer), bArray.hurryTexture, nullptr, &bArray.hurryRct);
             }
-            bArray.warnTimer++;
+            bArray.warnTimer += g_motion_step;
             if (bArray.warnTimer > HURRY_WARN_MP_FC) {
                 bArray.warnTimer = 0;
             }
@@ -580,7 +585,7 @@ void BubbleGame::UpdatePenguin(BubbleArray &bArray) {
             }
         }
     }
-    bArray.hurryTimer++;
+    bArray.hurryTimer += g_motion_step;
 
     float &angle = bArray.shooterSprite.angle;
     Penguin &penguin = bArray.penguinSprite;
@@ -599,11 +604,11 @@ void BubbleGame::UpdatePenguin(BubbleArray &bArray) {
 
     if (bArray.shooterLeft || bArray.shooterRight || bArray.shooterCenter) {
         if (bArray.shooterLeft) {
-            angle += (lowGfx ? LAUNCHER_SPEED : -LAUNCHER_SPEED) * g_motion_scale;
+            angle += LAUNCHER_SPEED * g_motion_scale;
             if(penguin.curAnimation != 1 && (penguin.curAnimation > 7 || penguin.curAnimation < 2)) penguin.PlayAnimation(2);
         }
         else if (bArray.shooterRight) {
-            angle -= (lowGfx ? LAUNCHER_SPEED : -LAUNCHER_SPEED) * g_motion_scale;
+            angle -= LAUNCHER_SPEED * g_motion_scale;
             if(penguin.curAnimation != 1 && (penguin.curAnimation > 7 || penguin.curAnimation < 2)) penguin.PlayAnimation(5);
         }
         else if (bArray.shooterCenter) {
@@ -615,7 +620,7 @@ void BubbleGame::UpdatePenguin(BubbleArray &bArray) {
         penguin.sleeping = 0;
     }
     else if(!bArray.shooterLeft && !bArray.shooterRight && !bArray.shooterCenter) {
-        penguin.sleeping++;
+        penguin.sleeping += g_motion_step;
         if (penguin.sleeping > TIMEOUT_PENGUIN_SLEEP && (penguin.curAnimation > 9 || penguin.curAnimation < 8)) penguin.PlayAnimation(8);
     }
 
@@ -839,7 +844,7 @@ void BubbleGame::DoFrozenAnimation(BubbleArray &bArray, int &waitTime){
         }
         else bArray.mpDone = true;
     }
-    else waitTime--;
+    else waitTime -= g_motion_step;
 }
 
 void BubbleGame::DoWinAnimation(BubbleArray &bArray, int &waitTime){
@@ -861,7 +866,7 @@ void BubbleGame::DoWinAnimation(BubbleArray &bArray, int &waitTime){
         }
         bArray.mpDone = true;
     }
-    else waitTime--;
+    else waitTime -= g_motion_step;
 }
 
 void BubbleGame::DoPrelightAnimation(BubbleArray &bArray, int &waitTime){
@@ -886,9 +891,9 @@ void BubbleGame::DoPrelightAnimation(BubbleArray &bArray, int &waitTime){
             }
             bArray.framePrelight = PRELIGHT_FRAMEWAIT;
         }
-        else bArray.framePrelight--;
+        else bArray.framePrelight -= g_motion_step;
     }
-    else waitTime--;
+    else waitTime -= g_motion_step;
 }
 
 void ResetPrelight(BubbleArray &bArray) {

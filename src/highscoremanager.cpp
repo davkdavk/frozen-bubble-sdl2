@@ -7,14 +7,7 @@
 #include <sstream>
 #include <string>
 
-#ifdef WII
-#include <stdio.h>
-#include <unistd.h>
-#include <gccore.h>
-#define HS_DEBUG_STEP(msg) do { printf("%s\n", msg); fflush(stdout); VIDEO_Flush(); VIDEO_WaitVSync(); VIDEO_WaitVSync(); usleep(500000); } while (0)
-#else
 #define HS_DEBUG_STEP(msg) do { } while (0)
-#endif
 
 struct HighscoreData {
     int level;

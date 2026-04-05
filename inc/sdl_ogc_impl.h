@@ -19,9 +19,7 @@ typedef struct SDL_Renderer {
     void* frame_buffer[2];
     int current_fb;
     bool video_active;
-    void* back_buffer;
-    GXTexObj back_buffer_tex;
-    bool back_buffer_dirty;
+    bool gx_frame_started;
 } SDL_Renderer;
 
 typedef struct SDL_Texture {
@@ -33,7 +31,8 @@ typedef struct SDL_Texture {
     int texId;
     SDL_Renderer* renderer;
     GXTexObj texObj;
-    void* buffer;
+    void* buffer;      // linear RGBA — CPU-side staging for SDL_UpdateTexture
+    void* gx_buffer;   // GX_TF_RGBA8 tiled layout — what GX actually reads
 } SDL_Texture;
 
 #endif

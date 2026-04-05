@@ -213,10 +213,6 @@ void MainMenu::Render(void) {
         button.Render(renderer);
     }
 
-#ifdef WII
-    return;
-#endif
-
     BannerRender();
     BlinkRender();
     CandyRender();
