@@ -413,7 +413,6 @@ void BubbleGame::NewGame(SetupSettings setup) {
             bubbleArrays[0].playerAssigned = 0;
             sprintf(path, DATA_DIR "/gfx/hurry_%s.png", "p1");
             bubbleArrays[0].hurryTexture = IMG_LoadTexture(rend, path);
-            audMixer->PlayMusic("main1p");
             break;
         case 2:
             background = IMG_LoadTexture(rend, DATA_DIR "/gfx/backgrnd.png");
@@ -444,7 +443,6 @@ void BubbleGame::NewGame(SetupSettings setup) {
             bubbleArrays[1].turnsToCompress = 12;
             sprintf(path, DATA_DIR "/gfx/hurry_%s.png", "p2");
             bubbleArrays[1].hurryTexture = IMG_LoadTexture(rend, path);
-            audMixer->PlayMusic("main2p");
             break;
     }
 
@@ -459,6 +457,16 @@ void BubbleGame::NewGame(SetupSettings setup) {
     }
     else {
         for (int i = 0; i < currentSettings.playerCount; i++) RandomLevel(bubbleArrays[i]);
+    }
+
+    // Start music AFTER all SD card I/O (LoadLevelset, LoadPenguin, IMG_LoadTexture).
+    // If PlayMusic is called before loading, the DSP streaming callback fires while
+    // the main thread is blocked on SD reads.  PumpMusic() never runs during that
+    // stall, both pre-filled buffers exhaust without being refilled, and the
+    // callback loops over the same two stale 256ms buffers indefinitely.
+    switch (currentSettings.playerCount) {
+        case 1: audMixer->PlayMusic("main1p"); break;
+        case 2: audMixer->PlayMusic("main2p"); break;
     }
 
     FrozenBubble::Instance()->startTime = SDL_GetTicks();

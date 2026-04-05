@@ -103,6 +103,23 @@ static bool fill_music_buf(u8 *buf, u32 len)
 }
 
 // ── AESND voice callback (called from DSP IRQ) ────────────────────────────────
+//
+// Disassembly of __dsp_requestcallback in libaesnd.a reveals the following
+// sequence for a streaming voice whose buffer is exhausted:
+//
+//   1. Tests stream flag (bit 0x40 in voice+0x28). If set → calls callback(state=2).
+//   2. After callback returns: re-reads voice+0x28.
+//   3. Tests RUNNING bit (bit 0x20). If set → sets stop flag (0x00200000) and
+//      calls callback(state=0).
+//
+// So if RUNNING (0x20) is still set when we return from the STREAM callback,
+// the stop flag gets re-armed immediately AFTER our SetVoiceStop(false).
+// The voice is then silently skipped on every subsequent DMA interrupt → silence.
+//
+// Fix: clear bit 0x20 (RUNNING) directly in voice+0x28 before returning from
+// the STREAM callback.  voice+0x28 is the 11th u32 in the opaque AESNDPB struct
+// (confirmed via objdump: all AESND functions access flags at pb+0x28).
+// The RUNNING bit is 0x20 (set by AESND_PlayVoice via `ori r10,r0,32`).
 
 static void music_voice_cb(AESNDPB *pb, u32 state)
 {
@@ -113,11 +130,13 @@ static void music_voice_cb(AESNDPB *pb, u32 state)
     // by the main thread via PumpMusic before needFill was cleared).
     int nextPlay = music.writeBuf;
     AESND_SetVoiceBuffer(pb, music.buf[nextPlay], MUSIC_BUF_SIZE);
-    // After buffer exhaustion the DSP IRQ handler always sets the stop flag
-    // (bit 0x00200000 in voice+0x28) before invoking this callback.
-    // AESND_SetVoiceBuffer does NOT clear that flag, so without this call the
-    // voice is silently skipped by __audio_dma_callback and streaming dies.
-    AESND_SetVoiceStop(pb, false);
+
+    // Clear the RUNNING bit (0x20) from voice+0x28 before returning.
+    // __dsp_requestcallback tests this bit AFTER the STREAM callback returns;
+    // if set it unconditionally re-arms the stop flag (0x00200000), killing
+    // streaming.  voice+0x28 is the flags word (offset 40 bytes into AESNDPB).
+    volatile u32 *flags = (volatile u32 *)((u8 *)pb + 0x28);
+    *flags &= ~0x20u;
 
     // Swap: old playBuf becomes the new writeBuf for the main thread to refill.
     music.writeBuf = music.playBuf;
