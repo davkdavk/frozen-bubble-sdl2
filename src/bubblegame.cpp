@@ -369,6 +369,15 @@ void BubbleGame::NewGame(SetupSettings setup) {
     SDL_Renderer *rend = const_cast<SDL_Renderer*>(renderer);
     currentSettings = setup;
 
+    // Stop any currently-playing music BEFORE any SD card I/O.
+    // LoadPenguin loads 394 textures, LoadLevelset reads the whole levels file,
+    // etc.  If a streaming track is active during that I/O the DSP callback
+    // exhausts both 256ms buffers while PumpMusic() is never called, causing
+    // the same snippet to loop until loading finishes.
+#ifdef WII
+    audMixer->StopMusic();
+#endif
+
     // Reset game-over flags so UpdatePenguin and Render work correctly on
     // re-entry (e.g. player quit a previous game mid-way or after losing).
     gameFinish = gameWon = gameLost = false;

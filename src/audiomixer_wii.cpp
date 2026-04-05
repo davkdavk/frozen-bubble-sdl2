@@ -238,6 +238,17 @@ static const struct { const char *id; const char *file; } kMusicFiles[] = {
     { "main2p",  "/snd/frozen-mainzik-2p.raw"  },
 };
 
+void AudioMixer::StopMusic()
+{
+    // Silence and stop the current music immediately.
+    // Called before long SD card I/O in NewGame() so the streaming callback
+    // cannot loop stale buffers while the main thread is blocked.
+    music.running = false;
+    if (music.voice) AESND_SetVoiceStop(music.voice, true);
+    if (music.fp) { fclose(music.fp); music.fp = nullptr; }
+    music.needFill = false;
+}
+
 void AudioMixer::PlayMusic(const char *track)
 {
     if (!mixerEnabled || !gameSettings->canPlayMusic() || haltedMixer) return;
