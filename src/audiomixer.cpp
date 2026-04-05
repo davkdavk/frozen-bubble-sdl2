@@ -1,3 +1,4 @@
+#ifndef WII
 #include "audiomixer.h"
 
 const struct MusicFile
@@ -92,3 +93,7 @@ void AudioMixer::MuteAll(bool enable){
         haltedMixer = true;
     }
 }
+
+void AudioMixer::PumpMusic() { /* no-op on non-Wii */ }
+
+#endif // WII

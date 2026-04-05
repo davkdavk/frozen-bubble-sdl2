@@ -534,6 +534,7 @@ enum TTF_WrappedAlign {
 char* SDL_GetPrefPath(const char* org, const char* app);
 void SDL_LogWarn(int category, const char* fmt, ...);
 void SDL_LogError(int category, const char* fmt, ...);
+void SDL_Log(const char* fmt, ...);
 int SDL_SetSurfaceBlendMode(SDL_Surface* surface, int blendMode);
 int SDL_BlitSurface(SDL_Surface* src, const SDL_Rect* srcrect, SDL_Surface* dst, SDL_Rect* dstrect);
 int SDL_BlitScaled(SDL_Surface* src, const SDL_Rect* srcrect, SDL_Surface* dst, SDL_Rect* dstrect);

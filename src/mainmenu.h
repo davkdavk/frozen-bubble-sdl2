@@ -94,10 +94,14 @@ private:
 
     //Options panel render
     bool showingOptPanel = false, awaitKp = false, runDelay = false;
+    bool showingLevelPickPanel = false;  // "pick start level" number-input panel
+    int pickLevel = 1;                   // currently selected start level (1..100)
+    static const int PICK_LEVEL_MAX = 100;
     int delayTime;
     SDL_Keycode lastOptInput = SDLK_UNKNOWN;
     SDL_Texture *voidPanelBG;
     void OptPanelRender();
+    void LevelPickPanelRender();
 
     //game setup defines
     bool chainReaction = false;

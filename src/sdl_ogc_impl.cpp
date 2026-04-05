@@ -100,7 +100,7 @@ static void tile_rgba8(const uint32_t* src, int w, int h, uint8_t* dst)
 static inline int gx_pad4(int v) { return (v + 3) & ~3; }
 
 // Minimal 8x8 bitmap font covering ASCII 32–126.
-// Each character is 8 bytes; bit 7 of each byte is the leftmost pixel.
+// Each character is 8 bytes; bit 0 of each byte is the leftmost pixel.
 // Sourced from the classic public-domain VGA ROM font.
 static const uint8_t font8x8[95][8] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // ' '
@@ -262,7 +262,7 @@ static SDL_Surface* create_text_surface(const char* text, SDL_Color fg, uint32_t
             for (int gy = 0; gy < 8; gy++) {
                 uint8_t row_bits = glyph[gy];
                 for (int gx = 0; gx < 8; gx++) {
-                    if (row_bits & (0x80u >> gx)) {
+                    if (row_bits & (1u << gx)) {
                         // Draw pixel at (cx+gx, row_y + gy*2) and (gy*2+1) for 2x height
                         int px_x = cx + gx;
                         int py0  = row_y + gy * 2;
@@ -734,17 +734,13 @@ SDL_Texture* SDL_CreateTexture(SDL_Renderer* renderer, uint32_t format, int acce
     tex->access = access;
     tex->renderer = renderer;
     tex->blend_mode = SDL_BLENDMODE_BLEND;
-
-    // Linear staging buffer for CPU writes.
-    tex->buffer = memalign(32, w * h * 4);
-    if (!tex->buffer) { delete tex; return NULL; }
-    memset(tex->buffer, 0, w * h * 4);
+    tex->buffer = NULL; // allocated on demand in SDL_UpdateTexture, freed after tiling
 
     // GX tiled buffer — dimensions padded to multiple of 4.
     int pw = gx_pad4(w);
     int ph = gx_pad4(h);
     tex->gx_buffer = memalign(32, pw * ph * 4);
-    if (!tex->gx_buffer) { free(tex->buffer); delete tex; return NULL; }
+    if (!tex->gx_buffer) { delete tex; return NULL; }
     memset(tex->gx_buffer, 0, pw * ph * 4);
     DCFlushRange(tex->gx_buffer, pw * ph * 4);
 
@@ -770,33 +766,22 @@ void SDL_DestroyTexture(SDL_Texture* texture) {
 }
 
 int SDL_UpdateTexture(SDL_Texture* texture, const SDL_Rect* rect, const void* pixels, int pitch) {
-    if (!texture || !texture->buffer || !pixels) return -1;
+    if (!texture || !pixels) return -1;
 
-    // Copy into linear staging buffer.
-    const uint8_t* src = (const uint8_t*)pixels;
-    uint8_t* dst = (uint8_t*)texture->buffer;
-    int row_bytes = texture->w * 4;
-    for (int y = 0; y < texture->h; y++) {
-        memcpy(dst + y * row_bytes, src + y * pitch, row_bytes);
-    }
-
-    // Tile into gx_buffer.
-    // If w/h are not multiples of 4 we need to blit into a padded scratch
-    // before tiling. We use a local stack buffer for small textures and
-    // heap for large ones; easiest approach is always pad into gx_buffer
-    // by building a padded linear image first.
+    // Build a padded linear image directly from the caller's pixels buffer,
+    // handling arbitrary pitch. No permanent staging buffer needed.
     int pw = gx_pad4(texture->w);
     int ph = gx_pad4(texture->h);
     size_t padded_size = pw * ph * 4;
 
-    // Allocate temporary padded image (stack is fine for small textures,
-    // but textures can be large so use heap).
     uint32_t* padded = (uint32_t*)malloc(padded_size);
     if (!padded) return -1;
     memset(padded, 0, padded_size);
-    const uint32_t* lin = (const uint32_t*)texture->buffer;
+
+    const uint8_t* src = (const uint8_t*)pixels;
+    int row_bytes = texture->w * 4;
     for (int y = 0; y < texture->h; y++) {
-        memcpy(padded + y * pw, lin + y * texture->w, texture->w * 4);
+        memcpy(padded + y * pw, src + y * pitch, row_bytes);
     }
 
     tile_rgba8(padded, pw, ph, (uint8_t*)texture->gx_buffer);
@@ -863,14 +848,19 @@ static void update_keyboard_state_from_input(void) {
         if (sy < -DEAD) keyboard_state[SDL_SCANCODE_DOWN]  = 1;
     }
 
-    // Wiimote — horizontal hold (NES-style): d-pad left/right aim, buttons 1/2 fire.
-    // UP/DOWN d-pad are menu-nav edge events; held state not needed for gameplay.
+    // Wiimote — horizontal hold, IR end pointing LEFT (verified on hardware):
+    //   WPAD_BUTTON_DOWN  = physical left
+    //   WPAD_BUTTON_UP    = physical right
+    //   WPAD_BUTTON_RIGHT = physical up
+    //   WPAD_BUTTON_LEFT  = physical down → centre cannon
     {
         WPADData* wd = WPAD_Data(0);
         if (wd) {
             u32 btns = wd->btns_h;
-            if (btns & WPAD_BUTTON_LEFT)  keyboard_state[SDL_SCANCODE_LEFT]   = 1;
-            if (btns & WPAD_BUTTON_RIGHT) keyboard_state[SDL_SCANCODE_RIGHT]  = 1;
+            if (btns & WPAD_BUTTON_UP)    keyboard_state[SDL_SCANCODE_LEFT]   = 1; // physical left
+            if (btns & WPAD_BUTTON_DOWN)  keyboard_state[SDL_SCANCODE_RIGHT]  = 1; // physical right
+            if (btns & WPAD_BUTTON_RIGHT) keyboard_state[SDL_SCANCODE_UP]     = 1; // physical up (menu nav)
+            if (btns & WPAD_BUTTON_LEFT)  keyboard_state[SDL_SCANCODE_DOWN]   = 1; // physical down → centre cannon
             // Buttons 1 and 2 fire (RETURN held = shooterAction).
             if (btns & (WPAD_BUTTON_1 | WPAD_BUTTON_2))
                                           keyboard_state[SDL_SCANCODE_RETURN] = 1;
@@ -1064,6 +1054,10 @@ static bool stick_down_prev  = false;
 
 // Previous-frame WPAD button state for direct edge detection.
 static u32 wpad_held_prev = 0;
+// Hold-HOME counter: incremented each frame HOME is held, reset when released.
+// At 50fps PAL, 50 frames ≈ 1 second.
+static int home_held_frames = 0;
+static const int HOME_HOLD_THRESHOLD = 50;
 
 // Called once per frame on the first SDL_PollEvent of each frame.
 static void generate_input_events(void) {
@@ -1083,17 +1077,39 @@ static void generate_input_events(void) {
         u32 btns_just = btns_h & ~wpad_held_prev;
         wpad_held_prev = btns_h;
 
-        // Home button: return to main menu (not quit to HBC).
-        if (btns_just & WPAD_BUTTON_HOME)  push_key(&e, SDLK_ESCAPE, SDL_SCANCODE_ESCAPE);
+        // Home button: tap (press edge, hold < threshold) = ESCAPE (menu return),
+        //              hold >= HOME_HOLD_THRESHOLD frames = F10 (exit to HBC).
+        bool home_now = (btns_h & WPAD_BUTTON_HOME) != 0;
+        if (home_now) {
+            home_held_frames++;
+            if (home_held_frames == 1) {
+                // Emit ESCAPE on first press (edge). If held >= threshold we'll
+                // emit F10 instead — but the ESCAPE has already been sent, which
+                // is harmless (it just returns to the menu then exits).
+                push_key(&e, SDLK_ESCAPE, SDL_SCANCODE_ESCAPE);
+            }
+            if (home_held_frames == HOME_HOLD_THRESHOLD) {
+                push_key(&e, SDLK_F10, SDL_SCANCODE_F10);
+            }
+        } else {
+            home_held_frames = 0;
+        }
         // Buttons 1 and 2: fire / menu confirm (edge event).
         if (btns_just & (WPAD_BUTTON_1 | WPAD_BUTTON_2))
             push_key(&e, SDLK_RETURN, SDL_SCANCODE_RETURN);
-        // All four d-pad directions fire edge events for menu navigation.
-        // Left/right also set held state (via update_keyboard_state_from_input) for gameplay aiming.
-        if (btns_just & WPAD_BUTTON_UP)    push_key(&e, SDLK_UP,    SDL_SCANCODE_UP);
-        if (btns_just & WPAD_BUTTON_DOWN)  push_key(&e, SDLK_DOWN,  SDL_SCANCODE_DOWN);
-        if (btns_just & WPAD_BUTTON_LEFT)  push_key(&e, SDLK_LEFT,  SDL_SCANCODE_LEFT);
-        if (btns_just & WPAD_BUTTON_RIGHT) push_key(&e, SDLK_RIGHT, SDL_SCANCODE_RIGHT);
+        // + button: dedicated next-level advance (only active on game-end screen).
+        if (btns_just & WPAD_BUTTON_PLUS)
+            push_key(&e, SDLK_TAB, SDL_SCANCODE_TAB);
+        // D-pad edge events — IR-left horizontal hold rotation applied:
+        // Wiimote d-pad — horizontal hold, IR end pointing LEFT (verified on hardware):
+        //   WPAD_BUTTON_DOWN  = physical left
+        //   WPAD_BUTTON_UP    = physical right
+        //   WPAD_BUTTON_RIGHT = physical up  (menu nav)
+        //   WPAD_BUTTON_LEFT  = physical down → centre cannon
+        if (btns_just & WPAD_BUTTON_UP)    push_key(&e, SDLK_LEFT,  SDL_SCANCODE_LEFT);
+        if (btns_just & WPAD_BUTTON_DOWN)  push_key(&e, SDLK_RIGHT, SDL_SCANCODE_RIGHT);
+        if (btns_just & WPAD_BUTTON_RIGHT) push_key(&e, SDLK_UP,    SDL_SCANCODE_UP);
+        if (btns_just & WPAD_BUTTON_LEFT)  push_key(&e, SDLK_DOWN,  SDL_SCANCODE_DOWN);
     }
 
     // --- GC pad digital D-pad + Start ---
@@ -1230,6 +1246,9 @@ void SDL_LogWarn(int category, const char* fmt, ...) {
 }
 
 void SDL_LogError(int category, const char* fmt, ...) {
+}
+
+void SDL_Log(const char* fmt, ...) {
 }
 
 int SDL_SetSurfaceBlendMode(SDL_Surface* surface, int blendMode) {

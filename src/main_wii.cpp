@@ -107,11 +107,23 @@ static u8 *load_rgba_file(const char *path, int *out_w, int *out_h) {
     return data;
 }
 
+// Fill the entire XFB with a YUY2 colour word (e.g. 0x00800080 = black).
+static void fill_xfb(u32 yuy2_word) {
+    u32 *p = (u32*)xfb;
+    u32 n = (rmode->fbWidth * rmode->xfbHeight * VI_DISPLAY_PIX_SZ) / 4;
+    for (u32 i = 0; i < n; i++) p[i] = yuy2_word;
+}
+
 // Draw the loading splash into the XFB: back_intro.png.rgba as background,
 // loading.png.rgba label centred near the bottom.
+// Falls back to a deep-blue screen if assets are missing so we never show black.
 static void show_loading_screen(void) {
     int xfb_w = rmode->fbWidth;
     int xfb_h = 480; // visible lines
+
+    // Fallback: deep blue — Y=29, Cb=145, Cr=63  (R=0,G=0,B=128)
+    // Packed as YUY2 word: [Y0 Cb Y1 Cr]
+    fill_xfb(0x1D911D3F);
 
     // Background: back_intro.png — 640x480, blitted at (0,0).
     {

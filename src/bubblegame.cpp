@@ -361,6 +361,9 @@ void SetupGameMetrics(BubbleArray *bArray, int playerCount, bool lowGfx){
     }
 }
 
+// Forward declaration — defined after NewGame below
+void RemoveArray(BubbleArray*, int);
+
 void BubbleGame::NewGame(SetupSettings setup) {
     audMixer = AudioMixer::Instance();
     SDL_Renderer *rend = const_cast<SDL_Renderer*>(renderer);
@@ -370,6 +373,9 @@ void BubbleGame::NewGame(SetupSettings setup) {
     // re-entry (e.g. player quit a previous game mid-way or after losing).
     gameFinish = gameWon = gameLost = false;
     firstRenderDone = false;
+
+    // Reset level counter; use startLevel (default 1) so pick_start_level works.
+    curLevel = (setup.startLevel >= 1) ? setup.startLevel : 1;
 
     // Discard any in-flight bullets from a previous game. A launching
     // SingleBubble only marks shouldClear=true on collision — if QuitToTitle
@@ -444,6 +450,9 @@ void BubbleGame::NewGame(SetupSettings setup) {
 
     SetupGameMetrics(bubbleArrays, currentSettings.playerCount, lowGfx);
 
+    // Clear bubble maps before loading so second NewGame doesn't double-fill them.
+    RemoveArray(bubbleArrays, currentSettings.playerCount);
+
     if (!currentSettings.randomLevels) {
         LoadLevelset(DATA_DIR "/data/levels");
         LoadLevel(curLevel);
@@ -454,6 +463,10 @@ void BubbleGame::NewGame(SetupSettings setup) {
 
     FrozenBubble::Instance()->startTime = SDL_GetTicks();
     FrozenBubble::Instance()->currentState = MainGame;
+
+    // Suppress fire for 10 frames so a held 1/2 button from the menu doesn't
+    // immediately shoot on the first frame of a new game.
+    shoot_lockout = 10;
 
     ChooseFirstBubble(bubbleArrays);
 }
@@ -524,7 +537,10 @@ void BubbleGame::ReloadGame(int level) {
         }
         ChooseFirstBubble(bubbleArrays);
     }
-    
+
+    // Suppress fire for 10 frames after level reload.
+    shoot_lockout = 10;
+
 }
 
 void BubbleGame::LaunchBubble(BubbleArray &bArray) {
@@ -543,7 +559,7 @@ void BubbleGame::UpdatePenguin(BubbleArray &bArray) {
     if (gameFinish) return;
 
     if (bArray.playerAssigned == 0) {
-        bArray.shooterAction = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_UP] || SDL_GetKeyboardState(NULL)[SDL_SCANCODE_RETURN];
+        bArray.shooterAction = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_RETURN];
         bArray.shooterLeft = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_LEFT];
         bArray.shooterRight = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_RIGHT];
         bArray.shooterCenter = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_DOWN];
@@ -553,6 +569,13 @@ void BubbleGame::UpdatePenguin(BubbleArray &bArray) {
         bArray.shooterLeft = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_X];
         bArray.shooterRight = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_V];
         bArray.shooterCenter = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_D]; 
+    }
+
+    // Suppress fire for the first few frames after a level load so a held
+    // 1/2 button from the menu/level-advance screen doesn't immediately shoot.
+    if (shoot_lockout > 0) {
+        shoot_lockout--;
+        bArray.shooterAction = false;
     }
 
     if (currentSettings.playerCount < 2) {
@@ -1166,6 +1189,12 @@ void BubbleGame::HandleInput(SDL_Event *e) {
                     else audMixer->MuteAll();
                     break;
                 case SDLK_RETURN:
+                    if (!gameFinish || (gameFinish && singleBubbles.size() > 0)) break;
+                    if (gameWon || gameMpDone) ReloadGame(++curLevel);
+                    else if (gameLost) ReloadGame(curLevel);
+                    break;
+                case SDLK_TAB:
+                    // + button on Wiimote: dedicated next-level / retry (only on game-end).
                     if (!gameFinish || (gameFinish && singleBubbles.size() > 0)) break;
                     if (gameWon || gameMpDone) ReloadGame(++curLevel);
                     else if (gameLost) ReloadGame(curLevel);

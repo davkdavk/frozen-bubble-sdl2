@@ -36,7 +36,7 @@
 #define BUBBLE_STICKFC 7
 #define BUBBLE_SPEED 10 / 2
 #define MALUS_BUBBLE_SPEED 30 / 2
-#define LAUNCHER_SPEED 0.015 * 0.6
+#define LAUNCHER_SPEED 0.015 * 1.2
 
 #define LAUNCHER_DIAMETER 50
 #define LAUNCHER_DIAMETER_MINI 25
@@ -208,7 +208,7 @@ struct Shooter {
         // so we always use the high-quality rotated path regardless of lowGfx.
         // Convert cannon angle (radians, PI/2=up, 0=right, PI=left) to SDL
         // degrees (0=up, positive=clockwise) for SDL_RenderCopyEx.
-        if(!lowGfx) SDL_RenderCopyEx(renderer, texture, nullptr, &rect, (PI/2.0f - angle) * (180.0f / PI), NULL, SDL_FLIP_NONE);
+        if(!lowGfx) SDL_RenderCopyEx(renderer, texture, nullptr, &rect, (PI/2.0f - angle) * (180.0f / PI) + 0.1f, NULL, SDL_FLIP_NONE);
         else {
             lowRct.x = (int)((rect.x - LAUNCHER_DIAMETER)  + (LAUNCHER_DIAMETER * cosf(angle)));
             lowRct.y = (int)((480 - 69) - (LAUNCHER_DIAMETER * sinf(angle)));
@@ -224,6 +224,7 @@ struct SetupSettings {
     int playerCount = 1;
     bool networkGame = false;
     bool randomLevels = false;
+    int startLevel = 1;   // 1-based; NewGame starts at this level
 };
 
 struct BubbleArray {
@@ -338,6 +339,7 @@ private:
 
     bool chainReaction = false;
     int timeLeft = 0, curLevel = 1, pauseFrame = 0, nextPauseUpd = 2, idxMPWinner = 0;
+    int shoot_lockout = 0; // frames to suppress fire after NewGame/ReloadGame
     int winsP1 = 0, winsP2 = 0; // 2p mode stuff
     Uint32 timePaused = 0;
 

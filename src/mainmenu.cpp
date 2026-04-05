@@ -161,7 +161,15 @@ void MainMenu::HandleInput(SDL_Event *e){
             if(e->key.repeat) break;
             if (awaitKp && (showingOptPanel || showing2PPanel) && e->key.keysym.sym != SDLK_ESCAPE) {
                 AudioMixer::Instance()->PlaySFX("typewriter");
+#ifdef WII
+                // On Wii there is no keyboard. Map confirm (RETURN) → Y so
+                // chain-reaction defaults to enabled, and ESCAPE/B → N.
+                SDL_Keycode sym = e->key.keysym.sym;
+                if (sym == SDLK_RETURN) sym = SDLK_y;
+                lastOptInput = sym;
+#else
                 lastOptInput = e->key.keysym.sym;
+#endif
                 awaitKp = false;
                 break;
             }
@@ -181,6 +189,11 @@ void MainMenu::HandleInput(SDL_Event *e){
                     if(SDL_GetKeyboardState(NULL)[SDL_SCANCODE_LCTRL] == SDL_PRESSED) RefreshCandy();
                     break;
                 case SDLK_ESCAPE:
+                    if (showingLevelPickPanel) {
+                        AudioMixer::Instance()->PlaySFX("cancel");
+                        showingLevelPickPanel = false;
+                        break;
+                    }
                     if (showingSPPanel) {
                         AudioMixer::Instance()->PlaySFX("cancel");
                         showingSPPanel = false;
@@ -192,7 +205,8 @@ void MainMenu::HandleInput(SDL_Event *e){
                         awaitKp = false;
                         break;
                     }
-                    FrozenBubble::Instance()->CallGameQuit();
+                    // Top-level ESCAPE (tap HOME from title screen): no-op.
+                    // Hold HOME emits F10 and is handled by frozenbubble.cpp.
                     break;
                 case SDLK_F11: // mute / unpause audio
                     if(AudioMixer::Instance()->IsHalted() == true) {
@@ -217,6 +231,7 @@ void MainMenu::Render(void) {
     BlinkRender();
     CandyRender();
     SPPanelRender();
+    LevelPickPanelRender();
     TPPanelRender();
     OptPanelRender();
 }
@@ -417,13 +432,38 @@ void MainMenu::OptPanelRender() {
     SDL_RenderCopy(const_cast<SDL_Renderer*>(renderer), panelText.Texture(), nullptr, panelText.Coords());
 }
 
+void MainMenu::LevelPickPanelRender() {
+    if (!showingLevelPickPanel) return;
+    SDL_RenderCopy(const_cast<SDL_Renderer*>(renderer), voidPanelBG, nullptr, &voidPanelRct);
+    SDL_RenderCopy(const_cast<SDL_Renderer*>(renderer), panelText.Texture(), nullptr, panelText.Coords());
+}
+
 void MainMenu::press() {
     if (showingOptPanel || showing2PPanel) return;
     AudioMixer::Instance()->PlaySFX("menu_selected");
 
+    if (showingLevelPickPanel) {
+        // Confirm: start game at pickLevel
+        TransitionManager::Instance()->DoSnipIn(const_cast<SDL_Renderer*>(renderer));
+        FrozenBubble::Instance()->bubbleGame()->NewGame({false, 1, false, false, pickLevel});
+        showingLevelPickPanel = false;
+        showingSPPanel = false;
+        return;
+    }
+
     if (showingSPPanel) {
         if (activeSPIdx == 0) SetupNewGame(1);
+        if (activeSPIdx == 1) {
+            // "pick start level" — open the level-pick sub-panel
+            showingLevelPickPanel = true;
+            pickLevel = 1;
+            char pnltxt[64];
+            sprintf(pnltxt, "Start at level:\n\n%d\n\nUp/Down to change\nA to confirm", pickLevel);
+            panelText.UpdateText(const_cast<SDL_Renderer *>(renderer), pnltxt, 0);
+            panelText.UpdatePosition({(640/2) - (panelText.Coords()->w / 2), (480/2) - 100});
+        }
         if (activeSPIdx == 2) ShowPanel(1);
+        if (activeSPIdx == 3) SetupNewGame(4); // multiplayer training
         return;
     }
 
@@ -434,6 +474,15 @@ void MainMenu::down()
 {
     if (showingOptPanel || showing2PPanel) return;
     AudioMixer::Instance()->PlaySFX("menu_change");
+
+    if (showingLevelPickPanel) {
+        if (pickLevel > 1) pickLevel--;
+        char pnltxt[64];
+        sprintf(pnltxt, "Start at level:\n\n%d\n\nUp/Down to change\nA to confirm", pickLevel);
+        panelText.UpdateText(const_cast<SDL_Renderer *>(renderer), pnltxt, 0);
+        panelText.UpdatePosition({(640/2) - (panelText.Coords()->w / 2), (480/2) - 100});
+        return;
+    }
 
     if (showingSPPanel) {
         if (activeSPIdx == SP_OPT - 1) activeSPIdx = 0;
@@ -456,6 +505,15 @@ void MainMenu::up()
 {
     if (showingOptPanel || showing2PPanel) return;
     AudioMixer::Instance()->PlaySFX("menu_change");
+
+    if (showingLevelPickPanel) {
+        if (pickLevel < PICK_LEVEL_MAX) pickLevel++;
+        char pnltxt[64];
+        sprintf(pnltxt, "Start at level:\n\n%d\n\nUp/Down to change\nA to confirm", pickLevel);
+        panelText.UpdateText(const_cast<SDL_Renderer *>(renderer), pnltxt, 0);
+        panelText.UpdatePosition({(640/2) - (panelText.Coords()->w / 2), (480/2) - 100});
+        return;
+    }
 
     if (showingSPPanel) {
         if (activeSPIdx == 0) activeSPIdx = SP_OPT - 1;
@@ -515,6 +573,9 @@ void MainMenu::SetupNewGame(int mode) {
         case 3:
             FrozenBubble::Instance()->bubbleGame()->NewGame({chainReaction, 1, false, true});
             break;
+        case 4: // multiplayer training (2-player, sequential levels)
+            FrozenBubble::Instance()->bubbleGame()->NewGame({false, 2, false, false});
+            break;
         default:
             break;
     }
@@ -528,6 +589,8 @@ void MainMenu::ReturnToMenu() {
     showingSPPanel = false;
     showing2PPanel = false;
     showingOptPanel = false;
+    showingLevelPickPanel = false;
+    pickLevel = 1;
     awaitKp = false;
     selectedMode = 0;
     runDelay = false;

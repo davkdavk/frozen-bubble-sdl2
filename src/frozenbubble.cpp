@@ -113,9 +113,7 @@ FrozenBubble::~FrozenBubble() {
 uint8_t FrozenBubble::RunForEver()
 {
     // on init, try playing one of these songs depending on the current state:
-#ifndef WII
     if(currentState == TitleScreen) audMixer->PlayMusic("intro");
-#endif
     //else if (currentState == MainGame) mainGame->NewGame({false, 1, false});
 
     float framerate = 60;
@@ -163,7 +161,10 @@ uint8_t FrozenBubble::RunForEver()
         // On Wii, VIDEO_WaitVSync() inside SDL_RenderPresent already paces the
         // frame to ~16.7ms. Adding SDL_Delay on top doubles the frame time to
         // ~32ms (31fps). Skip the delay on Wii and let vsync do the pacing.
-#ifndef WII
+#ifdef WII
+        // Pump music streaming buffers once per frame.
+        audMixer->PumpMusic();
+#else
         if(elapsed < frametime) {
             SDL_Delay(frametime - elapsed);
         }
@@ -208,12 +209,15 @@ void FrozenBubble::HandleInput(SDL_Event *e) {
                     }
                     break;
                 case SDLK_ESCAPE:
-                    // Home button: return to main menu from anywhere; quit from title screen.
+                    // Tap HOME: return to main menu from in-game.
+                    // From title screen, let mainmenu handle it (sub-panel dismissal).
                     if (currentState == MainGame) {
                         CallMenuReturn();
-                    } else {
-                        IsGameQuit = true;
                     }
+                    break;
+                case SDLK_F10:
+                    // Hold HOME: unconditional exit to HBC from anywhere.
+                    IsGameQuit = true;
                     break;
             }
             break;

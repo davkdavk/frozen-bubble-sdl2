@@ -34,6 +34,7 @@ set(WII_SOURCES
     src/mainmenu.cpp
     src/gamesettings.cpp
     src/audiomixer.cpp
+    src/audiomixer_wii.cpp
     src/shaderstuff.cpp
     src/bubblegame.cpp
     src/transitionmanager.cpp
@@ -49,7 +50,7 @@ set_property(TARGET frozen-bubble-wii.elf PROPERTY CXX_EXTENSIONS OFF)
 target_compile_definitions(frozen-bubble-wii.elf PRIVATE DATA_DIR=\"sd:/apps/frozenbubble/share\")
 
 target_link_libraries(frozen-bubble-wii.elf PRIVATE
-    -lwiiuse -lbte -lfat -logc -lm -lc -lstdc++ -lgcc
+    -lwiiuse -lbte -lfat -laesnd -logc -lm -lc -lstdc++ -lgcc
 )
 
 set(CMAKE_EXE_LINKER_FLAGS "-g -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/frozen-bubble-wii.elf.map -Wl,--gc-sections -L${OGC_LIB} -Wl,-e,__app_start -fno-exceptions -T${DEVKITPPC}/powerpc-eabi/lib/rvl.ld -Wl,--defsym,__isIPL=0")
